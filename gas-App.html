@@ -348,7 +348,7 @@ function vHome(){
   return `
   <section class="hero">
     <h1>이야기를 알고 들으면,<br>클래식이 들리기 시작합니다</h1>
-    <p>바로크부터 근대까지 15명의 작곡가, 37곡. 8주 입문 코스를 따라 한 곡씩, 그 곡이 태어난 이유와 함께 들어보세요.</p>
+    <p>바로크부터 근대까지 ${DATA.composers.length}명의 작곡가, ${DATA.pieces.length}곡. 8주 입문 코스를 따라 한 곡씩, 그 곡이 태어난 이유와 함께 들어보세요.</p>
     <div class="progress"><i style="width:${total?done/total*100:0}%"></i></div>
     <div class="progress-label">입문 코스 ${done} / ${total}곡 감상</div>
     <button class="hero-drive" onclick="Drive.open()">🚗 드라이브 모드 — 해설 듣고 음악 감상</button>
@@ -578,7 +578,10 @@ const Drive = {
     ].concat(DATA.eras.map(e => {
       const ids = DATA.pieces.filter(p => COMP[p.c].era === e.id).map(p => p.id);
       return { k: e.id, label: e.name, sub: e.years + ' · ' + ids.length + '곡', ids };
-    }));
+    })).concat([{ head: '작곡가별로 듣기' }]).concat(DATA.composers.map(c => {
+      const ids = DATA.pieces.filter(p => p.c === c.id).map(p => p.id);
+      return { k: 'c:' + c.id, label: c.name, sub: ids.length + '곡', ids };
+    }).filter(l => l.ids.length));
   },
   open(){
     if (Narrator.busy()) Narrator.stop();
@@ -669,7 +672,7 @@ const Drive = {
     if (!this.started) {
       el.innerHTML = `<div class="dv-top"><b>🚗 드라이브 모드</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
         <p class="dv-note">${Player.ready ? '출발 전에 들을 목록을 골라주세요. 곡마다 해설을 들려드린 뒤 음악이 이어지고, 끝나면 다음 곡으로 넘어갑니다.' : '플레이어 준비 중…'}</p>
-        <div class="dv-lists">${this.lists().map(l => `<button class="dv-list ${l.primary ? 'primary' : ''}" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>
+        <div class="dv-lists">${this.lists().map(l => l.head ? `<h4 class="dv-head">${esc(l.head)}</h4>` : `<button class="dv-list ${l.primary ? 'primary' : ''}" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>
         ${sets}
         <p class="dv-note">⚠️ 운전 중에는 화면 조작을 최소화하세요. 화면이 꺼지면 재생이 멈출 수 있으니 거치대에 두고 화면을 켜둔 채 사용하세요.</p>`;
       return;
