@@ -1,0 +1,787 @@
+<script>
+(function(){
+const ERA = {}; DATA.eras.forEach(e => ERA[e.id] = e);
+const COMP = {}; DATA.composers.forEach(c => COMP[c.id] = c);
+const PIECE = {}; DATA.pieces.forEach(p => PIECE[p.id] = p);
+const COURSE_ORDER = DATA.course.flatMap(w => w.ids);
+
+const S = { videos:{}, listened:{}, notes:{}, hasApiKey:false };
+const view = document.getElementById('view');
+const dock = document.getElementById('dock');
+let route = { v:'home' }, stack = [], libFilter = { q:'', era:'', form:'', lv:'' };
+
+/* ---------- 서버 호출 (GAS 밖에서 열면 브라우저 저장소로 동작) ---------- */
+const isGAS = typeof google !== 'undefined' && google.script && google.script.run;
+const LS = {
+  get(k, d){ try { const v = localStorage.getItem('cw_'+k); return v ? JSON.parse(v) : (d === undefined ? {} : d); } catch(e){ return d === undefined ? {} : d; } },
+  set(k,v){ try { localStorage.setItem('cw_'+k, JSON.stringify(v)); } catch(e){} }
+};
+const Mock = {
+  getState(){ return { videos:LS.get('videos'), listened:LS.get('listened'), notes:LS.get('notes'), hasApiKey:false }; },
+  setListened(id,on){ const m=LS.get('listened'); if(on) m[id]=new Date().toISOString().slice(0,10); else delete m[id]; LS.set('listened',m); return m; },
+  saveNote(id,t){ const m=LS.get('notes'); if(t) m[id]=t; else delete m[id]; LS.set('notes',m); return true; },
+  saveVideo(id,u){ const v=parseId(u); if(!v) throw new Error('유튜브 링크를 인식하지 못했어요.'); const m=LS.get('videos'); m[id]=v; LS.set('videos',m); return v; },
+  clearVideo(id){ const m=LS.get('videos'); delete m[id]; LS.set('videos',m); return true; },
+  findVideo(id){ return LS.get('videos')[id] || null; }
+};
+function parseId(s){ s=String(s||'').trim(); if(/^[\w-]{11}$/.test(s)) return s; const m=s.match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([\w-]{11})/); return m?m[1]:null; }
+/* 휴대폰 앱(설치형)에서는 Apps Script API로 기록을 주고받음 */
+const API_ID = (typeof window.CW_API === 'string' && window.CW_API) || '';
+const API_URL = 'https:/' + '/script.google.com/macros/s/' + API_ID + '/exec';
+const APP_MODE = !isGAS;
+let KEY = APP_MODE ? LS.get('key', '') : '';
+if (APP_MODE) {
+  const km = (location.hash || '').match(/k=([A-Za-z0-9]+)/);
+  if (km) { KEY = km[1]; LS.set('key', KEY); try { history.replaceState(null, '', location.pathname); } catch(e){} }
+}
+const BACKEND = isGAS ? 'gas' : (KEY && API_ID ? 'api' : 'local');
+function call(fn, ...args){
+  if (BACKEND === 'gas') return new Promise((res, rej) => google.script.run.withSuccessHandler(res).withFailureHandler(rej)[fn](...args));
+  if (BACKEND === 'api') {
+    return fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ key: KEY, fn, args }) })
+      .then(r => r.json())
+      .then(j => { if (!j.ok) throw new Error(j.error || '서버 오류'); return j.data; });
+  }
+  return new Promise((res, rej) => { try { res(Mock[fn](...args)); } catch(e){ rej(e); } });
+}
+
+/* ---------- 유틸 ---------- */
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const stars = n => '★'.repeat(n) + '☆'.repeat(3-n);
+const LV = {1:'입문',2:'중급',3:'도전'};
+const YTB = 'https:/' + '/www.youtube.com';
+const ytSearch = p => YTB + '/results?search_query=' + encodeURIComponent(p.q);
+function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),2400); }
+function doneCount(ids){ return ids.filter(id => S.listened[id]).length; }
+function markListened(id){
+  if (S.listened[id]) return;
+  call('setListened', id, true).then(m => { S.listened = m; if (!Drive.active) refreshMarks(); }).catch(()=>{});
+}
+function refreshMarks(){ if (['home','me','library','composer'].includes(route.v)) render(); }
+
+/* ---------- 설정 (해설 켜기/길이/속도) ---------- */
+const SET = Object.assign({ narr:true, len:'mid', rate:1 }, LS.get('set'));
+function saveSet(){ LS.set('set', SET); }
+const LEN_LABEL = { short:'짧게', mid:'보통', long:'길게' };
+const RATE_LABEL = { 0.9:'느리게', 1:'보통', 1.15:'빠르게' };
+
+/* ---------- 나레이션 (음성 읽기) ---------- */
+function clean(s){
+  return String(s)
+    .replace(/[“”"‘’'「」]/g,'')
+    .replace(/→/g,', ').replace(/[·•]/g,', ').replace(/[★☆]/g,'').replace(/—/g,', ')
+    .replace(/(\d{4})–(\d{2,4})/g,'$1년에서 $2년').replace(/–/g,'에서 ')
+    .replace(/([A-Ga-g])#/g,'$1샵 ').replace(/([A-Ga-g])♭/g,'$1플랫 ')
+    .replace(/Op\.(\d+)-(\d+)/g,'작품번호 $1의 $2').replace(/Op\.(\d+)/g,'작품번호 $1').replace(/K\.(\d+)/g,'쾨헬 $1')
+    .replace(/\s+/g,' ').trim();
+}
+const ORD = ['첫째','둘째','셋째','넷째','다섯째'];
+function pieceScript(p, len, lead){
+  const c = COMP[p.c], out = [];
+  out.push((lead || '') + c.full + '의 ' + p.t + '입니다.');
+  out.push('이 곡의 이야기입니다.');
+  p.story.forEach(s => out.push(s));
+  if (len !== 'short') {
+    out.push('듣기 포인트를 알려드릴게요.');
+    p.points.forEach((x, i) => out.push(ORD[i] + ', ' + x + '.'));
+  }
+  if (len === 'long') {
+    out.push('그 무렵 ' + c.name + '에 대해 조금 더 이야기해 볼게요.');
+    out.push(c.why);
+  }
+  out.push('그럼, 들어보시죠.');
+  return out.map(clean);
+}
+function composerScript(c){
+  return [c.full + '. ' + c.tagline + '.'].concat(c.story, ['왜 이 시대에 이런 음악이었을까요?', c.why]).map(clean);
+}
+
+const Narrator = {
+  ok: 'speechSynthesis' in window,
+  voice: null, queue: [], idx: 0, token: 0, speaking: false, paused: false, onEnd: null, cur: '', owner: null,
+  pickVoice(){
+    if (!this.ok) return;
+    const vs = speechSynthesis.getVoices();
+    this.voice = vs.find(v => /^ko/i.test(v.lang) && /google/i.test(v.name)) || vs.find(v => /^ko/i.test(v.lang)) || null;
+  },
+  split(text){ return String(text).replace(/([.!?])\s+/g, '$1\n').split('\n').map(s => s.trim()).filter(Boolean); },
+  speak(parts, onEnd, owner){
+    if (!this.ok) { toast('이 브라우저는 음성 읽기를 지원하지 않아요'); onEnd && onEnd(); return; }
+    this.stop();
+    if (!this.voice) this.pickVoice();
+    this.queue = parts.flatMap(p => this.split(p));
+    this.idx = 0; this.onEnd = onEnd || null; this.owner = owner || null;
+    this.speaking = true; this.paused = false;
+    this._next(++this.token);
+  },
+  _next(tok){
+    if (tok !== this.token) return;
+    if (this.idx >= this.queue.length) {
+      this.speaking = false; this.cur = '';
+      const f = this.onEnd; this.onEnd = null; this.owner = null;
+      notify(); f && f(); return;
+    }
+    const u = new SpeechSynthesisUtterance(this.queue[this.idx]);
+    u.lang = 'ko-KR'; if (this.voice) u.voice = this.voice; u.rate = SET.rate;
+    u.onend = () => { if (tok !== this.token) return; this.idx++; this._next(tok); };
+    u.onerror = e => { if (tok !== this.token) return; if (e.error === 'interrupted' || e.error === 'canceled') return; this.idx++; this._next(tok); };
+    this.cur = this.queue[this.idx];
+    speechSynthesis.speak(u);
+    notify();
+  },
+  pause(){ if (!this.speaking) return; this.token++; speechSynthesis.cancel(); this.speaking = false; this.paused = true; notify(); },
+  resume(){ if (!this.paused) return; this.paused = false; this.speaking = true; this._next(++this.token); },
+  stop(){ this.token++; if (this.ok) speechSynthesis.cancel(); this.speaking = false; this.paused = false; this.onEnd = null; this.cur = ''; this.owner = null; },
+  busy(){ return this.speaking || this.paused; }
+};
+if (Narrator.ok) { Narrator.pickVoice(); speechSynthesis.onvoiceschanged = () => Narrator.pickVoice(); }
+
+/* ---------- 유튜브 플레이어 (iframe + postMessage 직접 제어) ---------- */
+const Player = {
+  frame: null, ready: false, st: -1, piece: null, cands: [], ci: 0, wantPlay: false, primeGuard: false, readyP: null, watch: null, ping: null,
+  ensure(){
+    if (this.readyP) return this.readyP;
+    this.readyP = new Promise(res => {
+      this._res = res;
+      const f = document.createElement('iframe');
+      f.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture; fullscreen');
+      f.setAttribute('allowfullscreen', '');
+      f.src = YTB + '/embed/?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&origin=' + encodeURIComponent(location.origin);
+      f.onload = () => this._listen();
+      document.getElementById('ytPlayer').appendChild(f);
+      this.frame = f;
+    });
+    return this.readyP;
+  },
+  _post(o){ try { this.frame.contentWindow.postMessage(JSON.stringify(Object.assign({ id: 1, channel: 'widget' }, o)), '*'); } catch(e){} },
+  _listen(){
+    let n = 0; clearInterval(this.ping);
+    this.ping = setInterval(() => {
+      if (this.ready || ++n > 60) { clearInterval(this.ping); if (!this.ready) toast('플레이어를 불러오지 못했어요. 새로고침해 주세요.'); return; }
+      this._post({ event: 'listening' });
+    }, 250);
+  },
+  _msg(e){
+    if (!/^https:.{2}(www\.)?youtube(-nocookie)?\.com$/.test(e.origin || '')) return;
+    let d; try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch(err){ return; }
+    if (!d || !d.event) return;
+    if (d.event === 'onReady' || (d.event === 'initialDelivery' && !this.ready)) {
+      if (!this.ready) { this.ready = true; clearInterval(this.ping); this._res && this._res(); notify(); }
+    } else if (d.event === 'onStateChange') {
+      this._state(d.info);
+    } else if (d.event === 'infoDelivery' && d.info && typeof d.info.playerState === 'number') {
+      if (d.info.playerState !== this.st) this._state(d.info.playerState);
+    } else if (d.event === 'onError') {
+      this._error(d.info);
+    }
+  },
+  cmd(func, args){ this._post({ event: 'command', func, args: args || [] }); },
+  candidates(p){ return [...new Set([S.videos[p.id]].concat((DATA.videos || {})[p.id] || []).filter(Boolean))]; },
+  load(p, autoplay){
+    this.piece = p; this.cands = this.candidates(p); this.ci = 0; this.wantPlay = !!autoplay;
+    setDockInfo(p);
+    if (!this.cands.length) { toast('이 곡은 등록된 영상이 없어요'); return false; }
+    this._loadCur();
+    return true;
+  },
+  _loadCur(){
+    const id = this.cands[this.ci];
+    this.st = -1;
+    this.cmd(this.wantPlay ? 'loadVideoById' : 'cueVideoById', [{ videoId: id }]);
+  },
+  _error(){
+    if (this.ci < this.cands.length - 1) { this.ci++; this._loadCur(); return; }
+    toast('재생 가능한 영상을 찾지 못했어요');
+    if (Drive.started) setTimeout(() => Drive.next(), 1500);
+  },
+  _state(s){
+    if (s === this.st) return;
+    this.st = s;
+    if (s === 1 && this.primeGuard) { this.primeGuard = false; this.cmd('pauseVideo'); this.cmd('unMute'); this.wantPlay = false; }
+    if (s === 1) { Drive.needTap = false; }
+    if (s === 0) { const p = this.piece; this.wantPlay = false; if (p) markListened(p.id); if (Drive.started) setTimeout(() => Drive.next(), 300); }
+    notify();
+  },
+  mute(){ this.cmd('mute'); },
+  play(){
+    if (!this.frame) return;
+    this.primeGuard = false; this.wantPlay = true;
+    this.cmd('unMute'); this.cmd('playVideo');
+    clearTimeout(this.watch);
+    this.watch = setTimeout(() => {
+      if (this.wantPlay && this.st !== 1 && this.st !== 3) { Drive.needTap = true; notify(); }
+    }, 3500);
+  },
+  pause(){ this.wantPlay = false; this.cmd('pauseVideo'); },
+  state(){ return this.st; },
+  isPlaying(){ return this.st === 1; },
+  currentId(){ return this.cands[this.ci]; }
+};
+window.addEventListener('message', e => Player._msg(e));
+
+/* ---------- 하단 플레이어(독) ---------- */
+function setDockInfo(p){
+  const c = COMP[p.c];
+  document.getElementById('dockTitle').textContent = p.t;
+  document.getElementById('dockSub').textContent = c.name + ' · ' + p.alias;
+}
+function showDock(){
+  dock.classList.remove('hidden');
+  document.body.classList.add('docked');
+}
+function playPiece(p){
+  showDock();
+  dock.classList.remove('min'); document.body.classList.remove('dock-min');
+  document.getElementById('dockMin').textContent = '–';
+  if (Narrator.busy() && !Drive.active) Narrator.stop();
+  if (Player.ready) Player.load(p, true);
+  else { setDockInfo(p); Player.ensure().then(() => Player.load(p, true)); }
+}
+document.getElementById('dockClose').onclick = () => {
+  Player.pause(); Narrator.stop(); Player.piece = null;
+  dock.classList.add('hidden'); document.body.classList.remove('docked','dock-min'); notify();
+};
+document.getElementById('dockMin').onclick = e => {
+  const m = dock.classList.toggle('min');
+  e.target.textContent = m ? '▢' : '–';
+  document.body.classList.toggle('dock-min', m);
+};
+document.getElementById('dockNarr').onclick = () => {
+  const p = Player.piece; if (!p) return;
+  if (Narrator.busy()) { Narrator.stop(); notify(); return; }
+  const resume = Player.isPlaying(); if (resume) Player.pause();
+  Narrator.speak(pieceScript(p, SET.len, ''), () => { if (resume) Player.play(); }, 'dock');
+};
+
+/* ---------- 상태 갱신 ---------- */
+function notify(){
+  const db = document.getElementById('dockNarr'); if (db) db.textContent = Narrator.busy() ? '⏹' : '🔊';
+  document.querySelectorAll('[data-narr]').forEach(b => {
+    const on = Narrator.busy() && Narrator.owner === b.dataset.narr;
+    b.classList.toggle('on', on);
+    b.textContent = on ? '⏹ 해설 멈추기' : (b.dataset.label || '🔊 해설 듣기');
+  });
+  if (Drive.active) Drive.render();
+}
+
+/* ---------- 라우팅 (앱에서는 휴대폰 뒤로가기 버튼과 연동) ---------- */
+const NAV = APP_MODE && !!(window.history && history.pushState);
+const DETAIL = ['piece', 'composer'];
+let exitArmed = false;
+window.go = function(v, id, opts){
+  const tab = opts && opts.tab;
+  if (NAV) {
+    const st = { v, id: id || null };
+    if (tab && route.v !== 'home') history.replaceState(st, '');
+    else history.pushState(st, '');
+  } else if (!tab) {
+    stack.push(route);
+  } else {
+    stack = [];
+  }
+  route = { v, id };
+  render();
+  window.scrollTo(0,0);
+};
+window.back = function(){
+  if (NAV) { history.back(); return; }
+  route = stack.pop() || { v:'home' }; render(); window.scrollTo(0,0);
+};
+document.getElementById('nav').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.v === route.v) { window.scrollTo(0,0); return; }
+  if (NAV && b.dataset.v === 'home') { history.replaceState({ v:'home', id:null }, ''); route = { v:'home' }; render(); window.scrollTo(0,0); return; }
+  go(b.dataset.v, null, { tab:true });
+});
+if (NAV) {
+  history.replaceState({ root: true }, '');
+  history.pushState({ v: 'home', id: null }, '');
+  window.addEventListener('popstate', e => {
+    const s = e.state || {};
+    if (Drive.active && !s.drive) Drive.close(true);
+    if (s.root) {
+      if (exitArmed) { history.back(); return; }
+      exitArmed = true;
+      toast('뒤로 버튼을 한 번 더 누르면 종료됩니다');
+      setTimeout(() => { exitArmed = false; }, 2200);
+      history.pushState({ v: 'home', id: null }, '');
+      if (route.v !== 'home') { route = { v: 'home' }; render(); }
+      return;
+    }
+    if (s.drive) return;
+    if (s.v && (s.v !== route.v || s.id !== (route.id || null))) { route = { v: s.v, id: s.id }; render(); window.scrollTo(0,0); }
+  });
+}
+
+function render(){
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on',
+    b.dataset.v === route.v || (route.v==='composer' && b.dataset.v==='composers') || (route.v==='piece' && b.dataset.v==='library')));
+  const fn = { home:vHome, eras:vEras, composers:vComposers, composer:vComposer, library:vLibrary, piece:vPiece, me:vMe }[route.v] || vHome;
+  view.innerHTML = fn(route.id);
+  if (route.v === 'piece') bindPiece(route.id);
+  if (route.v === 'library') bindLibrary();
+  if (route.v === 'composer') bindComposer(route.id);
+  notify();
+}
+const backBtn = () => (NAV ? DETAIL.includes(route.v) : stack.length) ? '<button class="back" onclick="back()">← 뒤로</button>' : '';
+
+/* ---------- 공통 조각 ---------- */
+function pieceRow(p, showComp = true){
+  const c = COMP[p.c], e = ERA[c.era];
+  return `<div class="prow" onclick="go('piece','${p.id}')">
+    <span class="era-dot" style="background:${e.color}"></span>
+    <div class="t"><b>${esc(p.t)}</b><small>${showComp ? esc(c.name)+' · ' : ''}${esc(p.alias)} · ${esc(p.form)}</small></div>
+    <span class="lv" title="${LV[p.lv]}">${stars(p.lv)}</span>
+    <span class="ck ${S.listened[p.id]?'on':''}">✓</span>
+  </div>`;
+}
+function chip(id){
+  const p = PIECE[id], c = COMP[p.c];
+  return `<div class="chip ${S.listened[id]?'done':''}" onclick="go('piece','${id}')"><span class="ck">✓</span>${esc(p.t)} <small>${esc(c.name)}</small></div>`;
+}
+
+/* ---------- 홈: 입문 코스 ---------- */
+function vHome(){
+  const total = COURSE_ORDER.length, done = doneCount(COURSE_ORDER);
+  const nextId = COURSE_ORDER.find(id => !S.listened[id]);
+  const next = nextId && PIECE[nextId];
+  return `
+  <section class="hero">
+    <h1>이야기를 알고 들으면,<br>클래식이 들리기 시작합니다</h1>
+    <p>바로크부터 근대까지 15명의 작곡가, 37곡. 8주 입문 코스를 따라 한 곡씩, 그 곡이 태어난 이유와 함께 들어보세요.</p>
+    <div class="progress"><i style="width:${total?done/total*100:0}%"></i></div>
+    <div class="progress-label">입문 코스 ${done} / ${total}곡 감상</div>
+    <button class="hero-drive" onclick="Drive.open()">🚗 드라이브 모드 — 해설 듣고 음악 감상</button>
+    ${APP_MODE && installEvt && !isStandalone() ? '<button class="hero-drive" style="margin-left:8px;background:#fff" onclick="installApp()">📲 앱으로 설치</button>' : ''}
+  </section>
+
+  ${next ? `<h2 class="sec-title">다음에 들을 곡</h2>
+  <div class="card next" onclick="go('piece','${next.id}')">
+    <div class="portrait" style="background:${ERA[COMP[next.c].era].color}">${esc(COMP[next.c].name[0])}</div>
+    <div><b class="serif" style="font-size:19px">${esc(next.t)}</b><br>
+    <span class="muted">${esc(COMP[next.c].name)} · ${esc(next.alias)} · ${esc(next.dur)}</span><br>
+    <span style="font-size:14px">${esc(next.story[0].slice(0,70))}…</span></div>
+  </div>` : `<h2 class="sec-title">🎉 입문 코스를 모두 들으셨어요!</h2><p class="muted">“곡 찾기”에서 코스 밖의 곡들도 들어보세요.</p>`}
+
+  <h2 class="sec-title">8주 입문 코스</h2>
+  <div class="grid">
+    ${DATA.course.map(w => `
+      <div class="card week">
+        <div class="week-no">WEEK<b>${w.w}</b>${doneCount(w.ids)}/${w.ids.length}</div>
+        <div><h3>${esc(w.title)}</h3><p class="muted">${esc(w.desc)}</p>
+        <div class="chips">${w.ids.map(chip).join('')}</div></div>
+      </div>`).join('')}
+  </div>`;
+}
+
+/* ---------- 시대 여행 ---------- */
+function vEras(){
+  return `<h1 class="serif" style="margin:0 0 4px">시대 여행</h1>
+  <p class="muted" style="margin-top:0">클래식은 약 350년의 역사입니다. 시대의 분위기를 알면 왜 그런 음악이 나왔는지 보입니다.</p>
+  <div class="timeline">
+    ${DATA.eras.map(e => {
+      const cs = DATA.composers.filter(c => c.era === e.id);
+      return `<div class="era card" style="--c:${e.color}">
+        <h2>${esc(e.name)}</h2><div class="yrs">${esc(e.years)}</div>
+        <p>${esc(e.desc)}</p>
+        <b style="font-size:14px">이렇게 들어보세요</b>
+        <ul>${e.listen.map(l => `<li>${esc(l)}</li>`).join('')}</ul>
+        <div class="chips">${cs.map(c => `<div class="chip" onclick="go('composer','${c.id}')"><span class="ck" style="background:${e.color};border-color:${e.color}">${esc(c.name[0])}</span>${esc(c.name)} <small>${esc(c.years)}</small></div>`).join('')}</div>
+      </div>`;}).join('')}
+  </div>`;
+}
+
+/* ---------- 작곡가 ---------- */
+function vComposers(){
+  return `<h1 class="serif" style="margin:0 0 4px">작곡가</h1>
+  <p class="muted" style="margin-top:0">한 사람의 삶을 알면, 그 사람의 음악이 왜 그런 모양인지 이해됩니다.</p>
+  ${DATA.eras.map(e => `
+    <h2 class="sec-title"><span class="era-dot" style="background:${e.color}"></span>${esc(e.name)} <small class="muted" style="font-size:14px">${esc(e.years)}</small></h2>
+    <div class="grid g3">
+      ${DATA.composers.filter(c => c.era === e.id).map(c => {
+        const ps = DATA.pieces.filter(p => p.c === c.id);
+        return `<div class="card comp" style="--c:${e.color}" onclick="go('composer','${c.id}')">
+          <h3>${esc(c.name)}</h3><div class="en">${esc(c.en)} · ${esc(c.years)}</div>
+          <p>${esc(c.tagline)}</p>
+          <p class="muted" style="font-size:13px">${ps.length}곡 · ${doneCount(ps.map(p=>p.id))}곡 감상</p>
+        </div>`;}).join('')}
+    </div>`).join('')}`;
+}
+
+function vComposer(id){
+  const c = COMP[id], e = ERA[c.era];
+  const ps = DATA.pieces.filter(p => p.c === id);
+  return `${backBtn()}
+  <div class="card" style="--c:${e.color};border-top:5px solid ${e.color}">
+    <div class="head-row">
+      <div class="portrait" style="background:${e.color}">${esc(c.name[0])}</div>
+      <div><h1 class="serif" style="margin:0;font-size:24px">${esc(c.full)}</h1>
+      <div class="muted">${esc(c.en)} · ${esc(c.years)} · ${esc(c.country)} · <a href="javascript:void(0)" onclick="go('eras')">${esc(e.name)}</a></div></div>
+    </div>
+    <p class="serif" style="font-size:18px;margin:18px 0 10px;color:${e.color}">${esc(c.tagline)}</p>
+    <div class="actions" style="margin-bottom:12px"><button class="btn ghost narr-btn" id="cNarr" data-narr="c-${c.id}" data-label="🔊 이야기 듣기">🔊 이야기 듣기</button></div>
+    <div class="story">${c.story.map(s => `<p>${esc(s)}</p>`).join('')}</div>
+    <div class="why"><b>왜 이 시대에, 이런 음악이었을까?</b><p style="margin:6px 0 0">${esc(c.why)}</p></div>
+  </div>
+  <h2 class="sec-title">${esc(c.name)}의 곡</h2>
+  <div class="plist">${ps.map(p => pieceRow(p,false)).join('')}</div>`;
+}
+function bindComposer(id){
+  const c = COMP[id], key = 'c-' + id;
+  document.getElementById('cNarr').onclick = () => {
+    if (Narrator.busy() && Narrator.owner === key) { Narrator.stop(); notify(); return; }
+    const resume = Player.isPlaying(); if (resume) Player.pause();
+    Narrator.speak(composerScript(c), () => { if (resume) Player.play(); }, key);
+  };
+}
+
+/* ---------- 곡 찾기 ---------- */
+function vLibrary(){
+  const forms = [...new Set(DATA.pieces.map(p => p.form))];
+  return `<h1 class="serif" style="margin:0 0 14px">곡 찾기</h1>
+  <div class="filters">
+    <input id="fq" placeholder="곡명, 작곡가, 별명으로 검색 (예: 월광, 쇼팽)" value="${esc(libFilter.q)}">
+    <select id="fera"><option value="">모든 시대</option>${DATA.eras.map(e => `<option value="${e.id}" ${libFilter.era===e.id?'selected':''}>${esc(e.name)}</option>`).join('')}</select>
+    <select id="fform"><option value="">모든 장르</option>${forms.map(f => `<option ${libFilter.form===f?'selected':''}>${esc(f)}</option>`).join('')}</select>
+    <select id="flv"><option value="">모든 난이도</option>${[1,2,3].map(n => `<option value="${n}" ${libFilter.lv==n?'selected':''}>${LV[n]} ${stars(n)}</option>`).join('')}</select>
+  </div>
+  <div id="flist"></div>`;
+}
+function bindLibrary(){
+  const draw = () => {
+    const q = libFilter.q.trim().toLowerCase();
+    const list = DATA.pieces.filter(p => {
+      const c = COMP[p.c];
+      if (libFilter.era && c.era !== libFilter.era) return false;
+      if (libFilter.form && p.form !== libFilter.form) return false;
+      if (libFilter.lv && p.lv != libFilter.lv) return false;
+      if (q && !(p.t + p.alias + c.name + c.full + c.en + p.q).toLowerCase().includes(q)) return false;
+      return true;
+    });
+    document.getElementById('flist').innerHTML = list.length
+      ? `<p class="muted" style="font-size:14px">${list.length}곡</p><div class="plist">${list.map(p => pieceRow(p)).join('')}</div>`
+      : '<p class="muted">조건에 맞는 곡이 없어요.</p>';
+  };
+  document.getElementById('fq').addEventListener('input', e => { libFilter.q = e.target.value; draw(); });
+  document.getElementById('fera').addEventListener('change', e => { libFilter.era = e.target.value; draw(); });
+  document.getElementById('fform').addEventListener('change', e => { libFilter.form = e.target.value; draw(); });
+  document.getElementById('flv').addEventListener('change', e => { libFilter.lv = e.target.value; draw(); });
+  draw();
+}
+
+/* ---------- 곡 상세 ---------- */
+function vPiece(id){
+  const p = PIECE[id], c = COMP[p.c], e = ERA[c.era];
+  const i = COURSE_ORDER.indexOf(id);
+  const prev = i > 0 ? PIECE[COURSE_ORDER[i-1]] : null;
+  const next = i >= 0 && i < COURSE_ORDER.length-1 ? PIECE[COURSE_ORDER[i+1]] : null;
+  const week = DATA.course.find(w => w.ids.includes(id));
+  const others = DATA.pieces.filter(x => x.c === p.c && x.id !== id);
+  return `${backBtn()}
+  <div class="card phead" style="--c:${e.color}">
+    <span class="tag">${esc(e.name)}</span><span class="tag">${esc(p.form)}</span>${week?`<span class="tag">입문 코스 ${week.w}주차</span>`:''}
+    <h1>${esc(p.t)}</h1>
+    <div class="alias">${esc(p.alias)}</div>
+    <div class="meta">
+      <span>🎼 <a href="javascript:void(0)" onclick="go('composer','${c.id}')">${esc(c.full)}</a></span>
+      <span>📅 ${esc(p.y)}</span><span>⏱ ${esc(p.dur)}</span>
+      <span style="color:var(--gold)">${stars(p.lv)} ${LV[p.lv]}</span>
+    </div>
+    <div class="actions">
+      <button class="btn" id="playBtn">▶ 음악 듣기</button>
+      <button class="btn ghost narr-btn" id="narrBtn" data-narr="p-${p.id}">🔊 해설 듣기</button>
+      <button class="btn ${S.listened[id]?'done':'ghost'}" id="doneBtn">${S.listened[id]?'✓ 들었어요 · '+S.listened[id]:'○ 들었어요'}</button>
+    </div>
+    <div class="swap-link"><a href="javascript:void(0)" id="swapLink">다른 연주로 바꾸기</a></div>
+    <div id="finder"></div>
+  </div>
+
+  <h2 class="sec-title">이 곡의 이야기</h2>
+  <div class="card story">${p.story.map(s => `<p>${esc(s)}</p>`).join('')}</div>
+
+  <h2 class="sec-title">듣기 포인트</h2>
+  <div class="card" style="--c:${e.color}"><ol class="points">${p.points.map(x => `<li>${esc(x)}</li>`).join('')}</ol></div>
+
+  <h2 class="sec-title">그때 ${esc(c.name)}는</h2>
+  <div class="card why" style="--c:${e.color};margin-top:0;border-radius:14px;border-left-width:5px">
+    <b>${esc(c.tagline)}</b><p style="margin:6px 0 0">${esc(c.why)}</p>
+    <p style="margin:10px 0 0"><a href="javascript:void(0)" onclick="go('composer','${c.id}')">${esc(c.name)} 이야기 더 보기 →</a></p>
+  </div>
+
+  <h2 class="sec-title">내 감상 메모</h2>
+  <textarea id="note" placeholder="어떤 부분이 좋았는지, 어떤 장면이 떠올랐는지 적어두세요. 다시 들을 때 비교해보면 재미있어요.">${esc(S.notes[id]||'')}</textarea>
+  <div class="muted" style="font-size:13px;margin-top:4px" id="noteState">입력을 멈추면 자동 저장됩니다</div>
+
+  ${others.length ? `<h2 class="sec-title">${esc(c.name)}의 다른 곡</h2><div class="plist">${others.map(x => pieceRow(x,false)).join('')}</div>` : ''}
+
+  ${(prev||next) ? `<div class="pager">
+    ${prev ? `<button onclick="go('piece','${prev.id}')"><small>← 코스 이전 곡</small>${esc(prev.t)}</button>` : ''}
+    ${next ? `<button onclick="go('piece','${next.id}')"><small>코스 다음 곡 →</small>${esc(next.t)}</button>` : ''}
+  </div>` : ''}`;
+}
+
+function bindPiece(id){
+  const p = PIECE[id], key = 'p-' + id;
+  document.getElementById('playBtn').onclick = () => playPiece(p);
+  document.getElementById('narrBtn').onclick = () => {
+    if (Narrator.busy() && Narrator.owner === key) { Narrator.stop(); notify(); return; }
+    const resume = Player.isPlaying(); if (resume) Player.pause();
+    Narrator.speak(pieceScript(p, 'long', ''), () => { if (resume) Player.play(); }, key);
+  };
+  document.getElementById('swapLink').onclick = () => showFinder(p);
+  document.getElementById('doneBtn').onclick = async () => {
+    const on = !S.listened[id];
+    S.listened = await call('setListened', id, on).catch(err => { toast('저장 실패: '+(err.message||err)); return S.listened; });
+    if (on) toast('감상 기록에 추가했어요 🎵');
+    render();
+  };
+  const note = document.getElementById('note'), st = document.getElementById('noteState');
+  let h;
+  note.addEventListener('input', () => {
+    st.textContent = '입력 중…'; clearTimeout(h);
+    h = setTimeout(async () => {
+      const v = note.value.trim();
+      try { await call('saveNote', id, v); if (v) S.notes[id] = v; else delete S.notes[id]; st.textContent = '저장됨 ✓'; }
+      catch(e){ st.textContent = '저장 실패: ' + (e.message||e); }
+    }, 900);
+  });
+}
+
+function showFinder(p){
+  const box = document.getElementById('finder'); if (!box) return;
+  box.innerHTML = `<div class="finder">
+      <b>원하는 연주 영상으로 바꾸기</b><br>
+      ① <a href="${ytSearch(p)}" target="_blank" rel="noopener">유튜브에서 “${esc(p.q)}” 검색</a> → 마음에 드는 영상의 링크를 복사<br>
+      ② 아래에 붙여넣고 저장하면 다음부터 그 영상으로 재생됩니다
+      <div class="row"><input id="vurl" placeholder="유튜브 영상 링크 붙여넣기"><button class="btn" id="vsave">저장하고 듣기</button></div>
+      ${S.videos[p.id] ? '<div style="margin-top:8px"><a href="javascript:void(0)" id="vreset">기본 영상으로 되돌리기</a></div>' : ''}
+     </div>`;
+  document.getElementById('vsave').onclick = async () => {
+    const u = document.getElementById('vurl').value;
+    try { const vid = await call('saveVideo', p.id, u); S.videos[p.id] = vid; box.innerHTML = ''; playPiece(p); toast('영상을 등록했어요'); }
+    catch(e) { toast(e.message || String(e)); }
+  };
+  const r = document.getElementById('vreset');
+  if (r) r.onclick = async () => { await call('clearVideo', p.id).catch(()=>{}); delete S.videos[p.id]; box.innerHTML = ''; toast('기본 영상으로 되돌렸어요'); };
+}
+
+/* ---------- 드라이브 모드 ---------- */
+function shuffle(a){ a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+const Drive = {
+  active: false, started: false, list: [], i: 0, label: '', needTap: false, lock: null,
+  lists(){
+    const firstUnheard = Math.max(0, COURSE_ORDER.findIndex(id => !S.listened[id]));
+    const course = COURSE_ORDER.slice(firstUnheard).concat(COURSE_ORDER.slice(0, firstUnheard));
+    return [
+      { k:'course', label:'입문 코스 이어 듣기', sub: (firstUnheard + 1) + '번째 곡부터 · ' + PIECE[course[0]].t, ids: course, primary: true },
+      { k:'all', label:'전체 곡 랜덤', sub: DATA.pieces.length + '곡을 섞어서', ids: shuffle(DATA.pieces.map(p => p.id)) }
+    ].concat(DATA.eras.map(e => {
+      const ids = DATA.pieces.filter(p => COMP[p.c].era === e.id).map(p => p.id);
+      return { k: e.id, label: e.name, sub: e.years + ' · ' + ids.length + '곡', ids };
+    }));
+  },
+  open(){
+    if (Narrator.busy()) Narrator.stop();
+    this.active = true;
+    if (NAV) history.pushState({ drive: true }, '');
+    document.body.classList.add('drive');
+    dock.classList.remove('hidden','min');
+    this.render();
+    Player.ensure().then(() => this.render());
+    this.wake();
+  },
+  close(fromPop){
+    if (NAV && !fromPop && history.state && history.state.drive) { history.back(); return; }
+    Narrator.stop();
+    this.active = false; this.started = false; this.needTap = false;
+    document.body.classList.remove('drive');
+    if (Player.piece) { showDock(); setDockInfo(Player.piece); }
+    else { dock.classList.add('hidden'); document.body.classList.remove('docked'); }
+    try { this.lock && this.lock.release(); } catch(e){}
+    this.lock = null;
+    render();
+  },
+  async wake(){
+    try { if ('wakeLock' in navigator) this.lock = await navigator.wakeLock.request('screen'); } catch(e){}
+  },
+  start(k){
+    const L = this.lists().find(x => x.k === k); if (!L || !Player.ready) return;
+    this.list = L.ids; this.label = L.label; this.i = 0; this.started = true;
+    this.step(true);
+  },
+  step(first){
+    const p = PIECE[this.list[this.i]];
+    Narrator.stop(); this.needTap = false;
+    if (SET.narr) {
+      if (first) {
+        // 첫 곡: 탭한 순간 음소거로 재생을 시작해 모바일 자동재생 제한을 풀어둔다
+        Player.mute(); Player.primeGuard = true; Player.load(p, true);
+      } else {
+        Player.load(p, false);
+      }
+      const lead = first ? '드라이브 모드를 시작합니다. 첫 곡은 ' : '다음 곡은 ';
+      Narrator.speak(pieceScript(p, SET.len, lead), () => Player.play(), 'drive');
+    } else {
+      Player.load(p, true);
+      if (first) Narrator.speak([clean(COMP[p.c].full + '의 ' + p.t + '입니다.')], null, 'drive');
+    }
+    this.render();
+  },
+  next(){
+    if (!this.started) return;
+    if (this.i < this.list.length - 1) { this.i++; this.step(false); }
+    else { Player.pause(); Narrator.speak(['선택하신 목록을 모두 들었어요. 오늘도 좋은 음악과 함께해 주셔서 감사합니다.'], null, 'drive'); this.render(); }
+  },
+  prev(){ if (!this.started) return; if (this.i > 0) this.i--; this.step(false); },
+  toggle(){
+    if (Narrator.speaking) Narrator.pause();
+    else if (Narrator.paused) Narrator.resume();
+    else if (Player.isPlaying()) Player.pause();
+    else { Player.play(); }
+    this.needTap = false;
+    this.render();
+  },
+  replay(){
+    const p = PIECE[this.list[this.i]]; if (!p) return;
+    Player.pause();
+    Narrator.speak(pieceScript(p, SET.len, ''), () => Player.play(), 'drive');
+  },
+  toggleNarr(){ SET.narr = !SET.narr; saveSet(); if (!SET.narr && Narrator.busy()) { Narrator.stop(); Player.play(); } this.render(); },
+  cycleLen(){ const o = ['short','mid','long']; SET.len = o[(o.indexOf(SET.len) + 1) % 3]; saveSet(); this.render(); },
+  cycleRate(){ const o = [0.9, 1, 1.15]; SET.rate = o[(o.indexOf(SET.rate) + 1) % 3] || 1; saveSet(); this.render(); },
+  backToLists(){ Narrator.stop(); Player.pause(); this.started = false; this.render(); },
+  status(){
+    if (Narrator.speaking) return ['🔊 해설 중', ''];
+    if (Narrator.paused) return ['⏸ 해설 일시정지', 'idle'];
+    const st = Player.state();
+    if (st === 1) return ['▶ 음악 재생 중', 'play'];
+    if (st === 3) return ['⏳ 불러오는 중', 'idle'];
+    if (this.needTap) return ['👆 가운데 버튼을 눌러 재생', ''];
+    return ['⏸ 일시정지', 'idle'];
+  },
+  render(){
+    const el = document.getElementById('drive'); if (!el || !this.active) return;
+    const sets = `<div class="dv-sets">
+        <button class="dv-set" onclick="Drive.toggleNarr()"><small>해설</small>${SET.narr ? '켜짐' : '꺼짐'}</button>
+        <button class="dv-set" onclick="Drive.cycleLen()"><small>해설 길이</small>${LEN_LABEL[SET.len]}</button>
+        <button class="dv-set" onclick="Drive.cycleRate()"><small>읽기 속도</small>${RATE_LABEL[SET.rate] || '보통'}</button>
+      </div>`;
+    if (!this.started) {
+      el.innerHTML = `<div class="dv-top"><b>🚗 드라이브 모드</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
+        <p class="dv-note">${Player.ready ? '출발 전에 들을 목록을 골라주세요. 곡마다 해설을 들려드린 뒤 음악이 이어지고, 끝나면 다음 곡으로 넘어갑니다.' : '플레이어 준비 중…'}</p>
+        <div class="dv-lists">${this.lists().map(l => `<button class="dv-list ${l.primary ? 'primary' : ''}" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>
+        ${sets}
+        <p class="dv-note">⚠️ 운전 중에는 화면 조작을 최소화하세요. 화면이 꺼지면 재생이 멈출 수 있으니 거치대에 두고 화면을 켜둔 채 사용하세요.</p>`;
+      return;
+    }
+    const p = PIECE[this.list[this.i]], c = COMP[p.c];
+    const [st, cls] = this.status();
+    const playing = Narrator.speaking || Player.isPlaying();
+    el.innerHTML = `<div class="dv-top"><b>🚗 ${esc(this.label)}</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
+      <div class="dv-status ${cls}">${st}</div>
+      <div class="dv-count">${this.i + 1} / ${this.list.length} · ${esc(ERA[c.era].name)} · ${esc(p.form)}</div>
+      <h2 class="dv-title">${esc(p.t)}</h2>
+      <div class="dv-comp">${esc(c.full)}</div>
+      <div class="dv-caption">${Narrator.speaking ? esc(Narrator.cur) : ''}</div>
+      <div class="dv-ctrl">
+        <button onclick="Drive.prev()" aria-label="이전 곡">⏮</button>
+        <button class="main ${this.needTap ? 'tap' : ''}" onclick="Drive.toggle()" aria-label="재생/일시정지">${playing ? '⏸' : '▶'}</button>
+        <button onclick="Drive.next()" aria-label="다음 곡">⏭</button>
+      </div>
+      <div class="dv-row">
+        <button onclick="Drive.replay()">🔁 해설 다시</button>
+        <button onclick="Drive.toggleNarr()">해설 ${SET.narr ? '끄기' : '켜기'}</button>
+        <button onclick="Drive.backToLists()">📋 목록 바꾸기</button>
+      </div>`;
+  }
+};
+window.Drive = Drive;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Drive.active && !Drive.lock) Drive.wake(); });
+
+/* ---------- 휴대폰 앱 연결 ---------- */
+function connectCard(){
+  if (BACKEND === 'gas') {
+    return `<h2 class="sec-title">📱 휴대폰 앱</h2>
+    <div class="card" style="font-size:14px">
+      휴대폰에서 이 사이트를 앱처럼 설치해 쓸 수 있어요. 아래 링크를 휴대폰에서 열면 기록이 자동으로 연결됩니다.
+      <div class="actions" style="margin-top:12px"><button class="btn" onclick="showPhoneLink()">휴대폰 연결 링크 보기</button></div>
+      <div id="phoneLink"></div>
+    </div>`;
+  }
+  if (BACKEND === 'api') return `<h2 class="sec-title">📱 기록 연결</h2><div class="card" style="font-size:14px">✅ PC와 감상 기록이 연결되어 있어요. 어디서 듣든 같은 기록이 쌓입니다.</div>`;
+  return `<h2 class="sec-title">📱 기록 연결</h2><div class="card" style="font-size:14px">지금은 이 기기에만 기록이 저장돼요. PC(또는 휴대폰 크롬)에서 클래식 산책 사이트를 열고 <b>내 기록 → 휴대폰 연결 링크 보기</b>의 링크를 이 기기에서 열면 PC와 기록이 합쳐집니다.</div>`;
+}
+window.showPhoneLink = function(){
+  const box = document.getElementById('phoneLink'); if (!box) return;
+  box.innerHTML = '<p class="muted">링크 만드는 중…</p>';
+  call('getPhoneLink').then(link => {
+    box.innerHTML = `<div style="margin-top:14px;display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+        <div id="qrBox" style="background:#fff;padding:8px;border-radius:12px;border:1px solid var(--line)"></div>
+        <div style="flex:1;min-width:220px">
+          <b>휴대폰 카메라로 QR을 찍거나</b>, 링크를 휴대폰으로 보내 열어주세요.<br>
+          <span class="muted">열린 페이지에서 크롬 메뉴 ⋮ → <b>홈 화면에 추가 / 앱 설치</b>를 누르면 앱으로 설치됩니다. (아이폰은 사파리 공유 버튼 → 홈 화면에 추가)</span>
+          <div class="actions" style="margin-top:10px"><button class="btn ghost" id="copyLink">링크 복사</button><a class="btn ghost" href="${esc(link)}" target="_blank" rel="noopener" style="text-decoration:none">이 기기에서 열기</a></div>
+          <p class="muted" style="font-size:12px;margin-top:8px">이 링크에는 기록 연결 코드가 들어 있어요. 다른 사람에게 보내지 마세요.</p>
+        </div></div>`;
+    document.getElementById('copyLink').onclick = () => { (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('링크를 복사했어요'), () => prompt('아래 링크를 복사하세요', link)); };
+    const s = document.createElement('script');
+    s.src = 'https:/' + '/cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
+    s.onload = () => { try { const q = window.qrcode(0, 'M'); q.addData(link); q.make(); document.getElementById('qrBox').innerHTML = q.createSvgTag(5, 0); } catch(e){} };
+    document.head.appendChild(s);
+  }).catch(e => { box.innerHTML = '<p class="muted">링크를 만들지 못했어요: ' + esc(e.message || e) + '</p>'; });
+};
+
+/* ---------- 앱 설치 안내 ---------- */
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (route.v === 'home') render(); });
+window.installApp = function(){ if (!installEvt) return; installEvt.prompt(); installEvt.userChoice.finally(() => { installEvt = null; render(); }); };
+const isStandalone = () => (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+
+/* ---------- 내 기록 ---------- */
+function vMe(){
+  const ids = Object.keys(S.listened).filter(id => PIECE[id]).sort((a,b) => S.listened[b].localeCompare(S.listened[a]));
+  const noteIds = Object.keys(S.notes).filter(id => PIECE[id]);
+  const byEra = DATA.eras.map(e => {
+    const ps = DATA.pieces.filter(p => COMP[p.c].era === e.id);
+    return { e, n: doneCount(ps.map(p=>p.id)), t: ps.length };
+  });
+  return `<h1 class="serif" style="margin:0 0 14px">내 기록</h1>
+  <div class="grid g3">
+    <div class="card"><div class="muted">감상한 곡</div><b class="serif" style="font-size:30px">${ids.length}</b><span class="muted"> / ${DATA.pieces.length}</span></div>
+    <div class="card"><div class="muted">감상 메모</div><b class="serif" style="font-size:30px">${noteIds.length}</b></div>
+    <div class="card"><div class="muted">만난 작곡가</div><b class="serif" style="font-size:30px">${new Set(ids.map(id=>PIECE[id].c)).size}</b><span class="muted"> / ${DATA.composers.length}</span></div>
+  </div>
+
+  <h2 class="sec-title">시대별 진행</h2>
+  <div class="card">${byEra.map(x => `
+    <div style="margin:8px 0"><span class="era-dot" style="background:${x.e.color}"></span>${esc(x.e.name)} <span class="muted">${x.n}/${x.t}</span>
+    <div style="background:#eee5d7;border-radius:6px;height:7px;margin-top:4px"><div style="width:${x.t?x.n/x.t*100:0}%;height:100%;background:${x.e.color};border-radius:6px"></div></div></div>`).join('')}
+  </div>
+
+  ${noteIds.length ? `<h2 class="sec-title">감상 메모</h2>
+  <div class="grid g2">${noteIds.map(id => `<div class="card" style="cursor:pointer" onclick="go('piece','${id}')">
+    <b>${esc(PIECE[id].t)}</b> <small class="muted">${esc(COMP[PIECE[id].c].name)}</small>
+    <p style="margin:8px 0 0;white-space:pre-wrap;font-size:14px">${esc(S.notes[id].slice(0,160))}${S.notes[id].length>160?'…':''}</p></div>`).join('')}</div>` : ''}
+
+  <h2 class="sec-title">들은 곡</h2>
+  ${ids.length ? `<div class="plist">${ids.map(id => pieceRow(PIECE[id])).join('')}</div>` : '<p class="muted">아직 기록이 없어요. 입문 코스 1주차부터 시작해 보세요.</p>'}
+
+  ${connectCard()}
+
+  <h2 class="sec-title">재생 · 해설 설정</h2>
+  <div class="card" style="font-size:14px">
+    곡마다 기본 연주 영상이 연결되어 있고, 재생이 안 되는 영상은 자동으로 다음 후보로 넘어갑니다. 곡 화면의 “다른 연주로 바꾸기”로 원하는 연주를 지정할 수 있어요.<br>
+    직접 지정한 영상: ${Object.keys(S.videos).length}곡<br>
+    해설 음성: ${Narrator.ok ? (Narrator.voice ? esc(Narrator.voice.name) : '한국어 음성을 찾는 중 (기기 설정의 텍스트 음성 변환에서 한국어를 설치하면 더 자연스러워요)') : '이 브라우저는 음성 읽기를 지원하지 않아요'}
+  </div>`;
+}
+
+/* ---------- 시작 ---------- */
+if (APP_MODE && 'serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+view.innerHTML = '<p class="muted" style="text-align:center;padding:60px 0">불러오는 중…</p>';
+call('getState').then(st => { Object.assign(S, st); render(); })
+  .catch(e => { toast('기록을 불러오지 못했어요'); render(); });
+})();
+</script>

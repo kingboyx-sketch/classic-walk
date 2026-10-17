@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&family=Noto+Serif+KR:wght@500;700;900&display=swap" rel="stylesheet">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <header class="top">
+    <div class="brand" onclick="go('home')">
+      <span class="logo">♪</span>
+      <div><b>클래식 산책</b><small>이야기와 함께 듣는 클래식</small></div>
+    </div>
+    <nav id="nav">
+      <button data-v="home"><i>🏠</i><span>코스</span></button>
+      <button data-v="eras"><i>🕰️</i><span>시대</span></button>
+      <button data-v="composers"><i>🎼</i><span>작곡가</span></button>
+      <button data-v="library"><i>🔍</i><span>곡 찾기</span></button>
+      <button data-v="me"><i>📒</i><span>기록</span></button>
+    </nav>
+    <button class="drive-btn" onclick="Drive.open()">🚗 <span>드라이브 모드</span></button>
+  </header>
+
+  <main id="view"></main>
+
+  <aside id="dock" class="dock hidden">
+    <div class="dock-head">
+      <div class="dock-title"><b id="dockTitle"></b><small id="dockSub"></small></div>
+      <div class="dock-btns">
+        <button id="dockNarr" title="해설 듣기">🔊</button>
+        <button id="dockMin" title="접기">–</button>
+        <button id="dockClose" title="닫기">✕</button>
+      </div>
+    </div>
+    <div class="dock-video"><div id="ytPlayer"></div></div>
+    <section id="drive" class="drive"></section>
+  </aside>
+
+  <div id="toast"></div>
+
+  <?!= include('Data'); ?>
+  <?!= include('App'); ?>
+</body>
+</html>
