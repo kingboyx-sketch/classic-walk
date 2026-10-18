@@ -60,7 +60,7 @@ function markListened(id){
 function refreshMarks(){ if (['home','me','library','composer'].includes(route.v)) render(); }
 
 /* ---------- 설정 (해설 켜기/길이/속도) ---------- */
-const SET = Object.assign({ narr:true, len:'mid', rate:1 }, LS.get('set'));
+const SET = Object.assign({ narr:true, len:'mid', rate:1, ai:true }, LS.get('set'));
 function saveSet(){ LS.set('set', SET); }
 const LEN_LABEL = { short:'짧게', mid:'보통', long:'길게' };
 const RATE_LABEL = { 0.9:'느리게', 1:'보통', 1.15:'빠르게' };
@@ -96,19 +96,123 @@ function composerScript(c){
   return [c.full + '. ' + c.tagline + '.'].concat(c.story, ['왜 이 시대에 이런 음악이었을까요?', c.why]).map(clean);
 }
 
+/* ---------- AI 음성 파일 (드라이브에 저장된 해설 음성) ---------- */
+const NARR = window.NARR || { p:{}, c:{}, v:{}, g:{}, voices:[] };
+const Clips = {
+  mem: {}, wait: {},
+  url(k){ return 'tts-cache/' + encodeURIComponent(k); },
+  async fromCache(k){
+    try { if (!window.caches) return null; const c = await caches.open('cw-tts'); const r = await c.match(this.url(k)); return r ? await r.blob() : null; } catch(e){ return null; }
+  },
+  async toCache(k, blob){ try { if (!window.caches) return; const c = await caches.open('cw-tts'); await c.put(this.url(k), new Response(blob, { headers: { 'Content-Type': 'audio/mpeg' } })); } catch(e){} },
+  async get(keys){
+    const out = {}, miss = [];
+    for (const k of keys) {
+      if (this.mem[k]) { out[k] = this.mem[k]; continue; }
+      const b = await this.fromCache(k);
+      if (b) { out[k] = this.mem[k] = URL.createObjectURL(b); } else miss.push(k);
+    }
+    for (let i = 0; i < miss.length; i += 4) {
+      const part = miss.slice(i, i + 4);
+      const got = await call('getClips', part);
+      for (const k of part) {
+        if (!got || !got[k]) throw new Error('음성 없음 ' + k);
+        const bin = atob(got[k]), arr = new Uint8Array(bin.length);
+        for (let j = 0; j < bin.length; j++) arr[j] = bin.charCodeAt(j);
+        const blob = new Blob([arr], { type: 'audio/mpeg' });
+        this.toCache(k, blob);
+        out[k] = this.mem[k] = URL.createObjectURL(blob);
+      }
+    }
+    return keys.map(k => out[k]);
+  },
+  prefetch(keys){ if (SET.ai && keys.length) this.get(keys).catch(() => {}); }
+};
+function voiceOf(cid){ return NARR.v[cid] || NARR.voices[0] || ''; }
+function hasAI(p){ return !!(NARR.p[p.id] && NARR.v[p.c]); }
+// 곡 해설: 음성 파일 키 + 자막(대체 읽기용) 목록
+function pieceClips(p, len, lead){
+  if (!hasAI(p)) return pieceScript(p, len, lead === 'start' ? '드라이브 모드를 시작합니다. 첫 곡은 ' : lead === 'next' ? '다음 곡은 ' : '').map(t => ({ t }));
+  const v = voiceOf(p.c), n = NARR.p[p.id], out = [];
+  if (lead) out.push({ k: 'g_' + v + '_' + lead, t: NARR.g[lead] });
+  out.push({ k: 'a_' + p.id, t: n.a });
+  if (len !== 'short') out.push({ k: 'b_' + p.id, t: n.b });
+  if (len === 'long' && NARR.c[p.c]) out.push({ k: 'w_' + p.c, t: NARR.c[p.c].w });
+  out.push({ k: 'g_' + v + '_end', t: NARR.g.end });
+  return out;
+}
+function composerClips(c){
+  if (!NARR.c[c.id] || !NARR.v[c.id]) return composerScript(c).map(t => ({ t }));
+  return [{ k: 'c_' + c.id, t: NARR.c[c.id].s }];
+}
+function silentWav(){
+  const n = 800, b = new ArrayBuffer(44 + n), d = new DataView(b), w = (o, s) => { for (let i = 0; i < s.length; i++) d.setUint8(o + i, s.charCodeAt(i)); };
+  w(0,'RIFF'); d.setUint32(4, 36 + n, true); w(8,'WAVE'); w(12,'fmt '); d.setUint32(16,16,true); d.setUint16(20,1,true); d.setUint16(22,1,true);
+  d.setUint32(24,8000,true); d.setUint32(28,8000,true); d.setUint16(32,1,true); d.setUint16(34,8,true); w(36,'data'); d.setUint32(40,n,true);
+  for (let i = 0; i < n; i++) d.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+
 const Narrator = {
   ok: 'speechSynthesis' in window,
   voice: null, queue: [], idx: 0, token: 0, speaking: false, paused: false, onEnd: null, cur: '', owner: null,
+  mode: 'tts', audio: null, clips: [], urls: [],
   pickVoice(){
     if (!this.ok) return;
     const vs = speechSynthesis.getVoices();
     this.voice = vs.find(v => /^ko/i.test(v.lang) && /google/i.test(v.name)) || vs.find(v => /^ko/i.test(v.lang)) || null;
   },
+  el(){ if (!this.audio) { this.audio = new Audio(); this.audio.preload = 'auto'; } return this.audio; },
+  // 사용자가 화면을 누른 순간 한 번 소리 없이 재생해 두면, 이후 자동 재생이 막히지 않아요
+  unlock(){ try { const a = this.el(); if (a.src && !a.paused) return; a.src = silentWav(); const p = a.play(); p && p.catch(() => {}); } catch(e){} },
   split(text){ return String(text).replace(/([.!?])\s+/g, '$1\n').split('\n').map(s => s.trim()).filter(Boolean); },
+  // 음성 파일로 읽기 (없거나 실패하면 기기 음성으로)
+  say(clips, onEnd, owner){
+    const texts = clips.map(c => c.t);
+    if (!SET.ai || !clips.length || !clips.every(c => c.k)) return this.speak(texts, onEnd, owner);
+    this.stop();
+    this.unlock();
+    const tok = ++this.token;
+    this.mode = 'ai'; this.clips = clips; this.idx = 0; this.onEnd = onEnd || null; this.owner = owner || null;
+    this.speaking = true; this.paused = false; this.cur = clips[0].t; this.loading = true;
+    notify();
+    Clips.get(clips.map(c => c.k)).then(urls => {
+      if (tok !== this.token) return;
+      this.loading = false; this.urls = urls; this._aiNext(tok);
+    }).catch(() => {
+      if (tok !== this.token) return;
+      this.loading = false;
+      const f = this.onEnd, o = this.owner;
+      this.speak(texts, f, o);
+    });
+  },
+  _aiNext(tok){
+    if (tok !== this.token) return;
+    if (this.idx >= this.clips.length) return this._finish();
+    const a = this.el();
+    this.cur = this.clips[this.idx].t;
+    a.onended = () => { if (tok !== this.token) return; this.idx++; this._aiNext(tok); };
+    a.onerror = () => { if (tok !== this.token) return; this._toTts(tok); };
+    a.src = this.urls[this.idx];
+    a.playbackRate = SET.rate || 1;
+    const p = a.play();
+    if (p) p.catch(() => { if (tok === this.token && !this.paused) this._toTts(tok); });
+    notify();
+  },
+  _toTts(tok){
+    const rest = this.clips.slice(this.idx).map(c => c.t), f = this.onEnd, o = this.owner;
+    this.speak(rest, f, o);
+  },
+  _finish(){
+    this.speaking = false; this.cur = ''; this.mode = 'tts';
+    const f = this.onEnd; this.onEnd = null; this.owner = null;
+    notify(); f && f();
+  },
   speak(parts, onEnd, owner){
     if (!this.ok) { toast('이 브라우저는 음성 읽기를 지원하지 않아요'); onEnd && onEnd(); return; }
     this.stop();
     if (!this.voice) this.pickVoice();
+    this.mode = 'tts';
     this.queue = parts.flatMap(p => this.split(p));
     this.idx = 0; this.onEnd = onEnd || null; this.owner = owner || null;
     this.speaking = true; this.paused = false;
@@ -116,11 +220,7 @@ const Narrator = {
   },
   _next(tok){
     if (tok !== this.token) return;
-    if (this.idx >= this.queue.length) {
-      this.speaking = false; this.cur = '';
-      const f = this.onEnd; this.onEnd = null; this.owner = null;
-      notify(); f && f(); return;
-    }
+    if (this.idx >= this.queue.length) return this._finish();
     const u = new SpeechSynthesisUtterance(this.queue[this.idx]);
     u.lang = 'ko-KR'; if (this.voice) u.voice = this.voice; u.rate = SET.rate;
     u.onend = () => { if (tok !== this.token) return; this.idx++; this._next(tok); };
@@ -129,9 +229,26 @@ const Narrator = {
     speechSynthesis.speak(u);
     notify();
   },
-  pause(){ if (!this.speaking) return; this.token++; speechSynthesis.cancel(); this.speaking = false; this.paused = true; notify(); },
-  resume(){ if (!this.paused) return; this.paused = false; this.speaking = true; this._next(++this.token); },
-  stop(){ this.token++; if (this.ok) speechSynthesis.cancel(); this.speaking = false; this.paused = false; this.onEnd = null; this.cur = ''; this.owner = null; },
+  pause(){
+    if (!this.speaking) return;
+    if (this.mode === 'ai') { if (this.audio) this.audio.pause(); }
+    else { this.token++; speechSynthesis.cancel(); }
+    this.speaking = false; this.paused = true; notify();
+  },
+  resume(){
+    if (!this.paused) return;
+    this.paused = false; this.speaking = true;
+    if (this.mode === 'ai') {
+      if (this.loading) { notify(); return; }
+      const p = this.audio && this.audio.play(); p && p.catch(() => this._toTts(this.token)); notify();
+    } else this._next(++this.token);
+  },
+  stop(){
+    this.token++;
+    if (this.ok) speechSynthesis.cancel();
+    if (this.audio) { try { this.audio.pause(); } catch(e){} }
+    this.speaking = false; this.paused = false; this.onEnd = null; this.cur = ''; this.owner = null; this.mode = 'tts'; this.loading = false;
+  },
   busy(){ return this.speaking || this.paused; }
 };
 if (Narrator.ok) { Narrator.pickVoice(); speechSynthesis.onvoiceschanged = () => Narrator.pickVoice(); }
@@ -250,7 +367,7 @@ document.getElementById('dockNarr').onclick = () => {
   const p = Player.piece; if (!p) return;
   if (Narrator.busy()) { Narrator.stop(); notify(); return; }
   const resume = Player.isPlaying(); if (resume) Player.pause();
-  Narrator.speak(pieceScript(p, SET.len, ''), () => { if (resume) Player.play(); }, 'dock');
+  Narrator.say(pieceClips(p, SET.len, ''), () => { if (resume) Player.play(); }, 'dock');
 };
 
 /* ---------- 상태 갱신 ---------- */
@@ -431,7 +548,7 @@ function bindComposer(id){
   document.getElementById('cNarr').onclick = () => {
     if (Narrator.busy() && Narrator.owner === key) { Narrator.stop(); notify(); return; }
     const resume = Player.isPlaying(); if (resume) Player.pause();
-    Narrator.speak(composerScript(c), () => { if (resume) Player.play(); }, key);
+    Narrator.say(composerClips(c), () => { if (resume) Player.play(); }, key);
   };
 }
 
@@ -526,7 +643,7 @@ function bindPiece(id){
   document.getElementById('narrBtn').onclick = () => {
     if (Narrator.busy() && Narrator.owner === key) { Narrator.stop(); notify(); return; }
     const resume = Player.isPlaying(); if (resume) Player.pause();
-    Narrator.speak(pieceScript(p, 'long', ''), () => { if (resume) Player.play(); }, key);
+    Narrator.say(pieceClips(p, 'long', ''), () => { if (resume) Player.play(); }, key);
   };
   document.getElementById('swapLink').onclick = () => showFinder(p);
   document.getElementById('doneBtn').onclick = async () => {
@@ -610,6 +727,7 @@ const Drive = {
   start(k){
     const L = this.lists().find(x => x.k === k); if (!L || !Player.ready) return;
     this.list = L.ids; this.label = L.label; this.i = 0; this.started = true;
+    Narrator.unlock();
     this.step(true);
   },
   step(first){
@@ -622,8 +740,9 @@ const Drive = {
       } else {
         Player.load(p, false);
       }
-      const lead = first ? '드라이브 모드를 시작합니다. 첫 곡은 ' : '다음 곡은 ';
-      Narrator.speak(pieceScript(p, SET.len, lead), () => Player.play(), 'drive');
+      Narrator.say(pieceClips(p, SET.len, first ? 'start' : 'next'), () => Player.play(), 'drive');
+      const np = PIECE[this.list[this.i + 1]];
+      if (np && hasAI(np)) setTimeout(() => Clips.prefetch(pieceClips(np, SET.len, 'next').map(c => c.k)), 4000);
     } else {
       Player.load(p, true);
       if (first) Narrator.speak([clean(COMP[p.c].full + '의 ' + p.t + '입니다.')], null, 'drive');
@@ -633,7 +752,7 @@ const Drive = {
   next(){
     if (!this.started) return;
     if (this.i < this.list.length - 1) { this.i++; this.step(false); }
-    else { Player.pause(); Narrator.speak(['선택하신 목록을 모두 들었어요. 오늘도 좋은 음악과 함께해 주셔서 감사합니다.'], null, 'drive'); this.render(); }
+    else { Player.pause(); const lp = PIECE[this.list[this.i]], v = voiceOf(lp.c); Narrator.say(hasAI(lp) ? [{ k: 'g_' + v + '_done', t: NARR.g.done }] : [{ t: '선택하신 목록을 모두 들었어요. 오늘도 좋은 음악과 함께해 주셔서 감사합니다.' }], null, 'drive'); this.render(); }
   },
   prev(){ if (!this.started) return; if (this.i > 0) this.i--; this.step(false); },
   toggle(){
@@ -647,13 +766,15 @@ const Drive = {
   replay(){
     const p = PIECE[this.list[this.i]]; if (!p) return;
     Player.pause();
-    Narrator.speak(pieceScript(p, SET.len, ''), () => Player.play(), 'drive');
+    Narrator.say(pieceClips(p, SET.len, ''), () => Player.play(), 'drive');
   },
   toggleNarr(){ SET.narr = !SET.narr; saveSet(); if (!SET.narr && Narrator.busy()) { Narrator.stop(); Player.play(); } this.render(); },
   cycleLen(){ const o = ['short','mid','long']; SET.len = o[(o.indexOf(SET.len) + 1) % 3]; saveSet(); this.render(); },
+  toggleAI(){ SET.ai = !SET.ai; saveSet(); this.render(); },
   cycleRate(){ const o = [0.9, 1, 1.15]; SET.rate = o[(o.indexOf(SET.rate) + 1) % 3] || 1; saveSet(); this.render(); },
   backToLists(){ Narrator.stop(); Player.pause(); this.started = false; this.render(); },
   status(){
+    if (Narrator.loading) return ['⏳ 해설 불러오는 중', 'idle'];
     if (Narrator.speaking) return ['🔊 해설 중', ''];
     if (Narrator.paused) return ['⏸ 해설 일시정지', 'idle'];
     const st = Player.state();
@@ -668,6 +789,7 @@ const Drive = {
         <button class="dv-set" onclick="Drive.toggleNarr()"><small>해설</small>${SET.narr ? '켜짐' : '꺼짐'}</button>
         <button class="dv-set" onclick="Drive.cycleLen()"><small>해설 길이</small>${LEN_LABEL[SET.len]}</button>
         <button class="dv-set" onclick="Drive.cycleRate()"><small>읽기 속도</small>${RATE_LABEL[SET.rate] || '보통'}</button>
+        <button class="dv-set" onclick="Drive.toggleAI()"><small>해설 목소리</small>${SET.ai ? 'AI 성우' : '기기 기본'}</button>
       </div>`;
     if (!this.started) {
       el.innerHTML = `<div class="dv-top"><b>🚗 드라이브 모드</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
@@ -734,6 +856,17 @@ window.showPhoneLink = function(){
   }).catch(e => { box.innerHTML = '<p class="muted">링크를 만들지 못했어요: ' + esc(e.message || e) + '</p>'; });
 };
 
+/* ---------- 해설 목소리 설정 ---------- */
+function ttsCard(){
+  const n = Object.keys(NARR.p).length;
+  return `<h2 class="sec-title">🎙 해설 목소리</h2>
+  <div class="card" style="font-size:14px">
+    ${n ? `${n}곡의 해설을 AI 성우(구글 Chirp 3 HD, 여성 4명)가 읽어요. 작곡가마다 같은 성우가 맡고, 한 번 들은 해설은 기기에 저장돼 다음부터 바로 나와요.` : 'AI 성우 해설이 아직 준비되지 않았어요.'}
+    <div class="actions" style="margin-top:12px"><button class="btn ${SET.ai ? '' : 'ghost'}" onclick="setAI(true)">AI 성우</button><button class="btn ${SET.ai ? 'ghost' : ''}" onclick="setAI(false)">기기 기본 음성</button></div>
+  </div>`;
+}
+window.setAI = function(on){ SET.ai = on; saveSet(); render(); };
+
 /* ---------- 앱 설치 안내 ---------- */
 let installEvt = null;
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (route.v === 'home') render(); });
@@ -771,6 +904,8 @@ function vMe(){
 
   ${connectCard()}
 
+  ${ttsCard()}
+
   <h2 class="sec-title">재생 · 해설 설정</h2>
   <div class="card" style="font-size:14px">
     곡마다 기본 연주 영상이 연결되어 있고, 재생이 안 되는 영상은 자동으로 다음 후보로 넘어갑니다. 곡 화면의 “다른 연주로 바꾸기”로 원하는 연주를 지정할 수 있어요.<br>
@@ -783,6 +918,7 @@ function vMe(){
 if (APP_MODE && 'serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
+window.__cw = { pieceClips, composerClips, Narrator, Mock, PIECE, Clips };
 view.innerHTML = '<p class="muted" style="text-align:center;padding:60px 0">불러오는 중…</p>';
 call('getState').then(st => { Object.assign(S, st); render(); })
   .catch(e => { toast('기록을 불러오지 못했어요'); render(); });
