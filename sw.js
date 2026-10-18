@@ -1,5 +1,5 @@
 // 클래식 산책 서비스워커 — 앱 화면을 저장해 두고, 새 버전이 있으면 받아옴
-const CACHE = 'classic-walk-7159abc5';
+const CACHE = 'classic-walk-a90342de';
 const SHELL = ['./', './index.html', './config.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

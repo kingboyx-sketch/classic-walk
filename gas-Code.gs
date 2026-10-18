@@ -36,7 +36,7 @@ function doPost(e) {
   try {
     const req = JSON.parse(e.postData.contents || '{}');
     if (!req.key || req.key !== appKey_()) throw new Error('연결 코드가 맞지 않아요. PC의 내 기록 화면에서 휴대폰 연결 링크를 다시 열어주세요.');
-    const fns = { getState: getState_, setListened: setListened_, saveNote: saveNote_, saveVideo: saveVideo_, clearVideo: clearVideo_, ttsSample: ttsSample_, getClips: getClips_ };
+    const fns = { getState: getState_, setListened: setListened_, saveNote: saveNote_, saveVideo: saveVideo_, clearVideo: clearVideo_, getClips: getClips_ };
     const fn = fns[req.fn];
     if (!fn) throw new Error('알 수 없는 요청');
     out = { ok: true, data: fn.apply(null, req.args || []) };

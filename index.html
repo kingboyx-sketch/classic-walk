@@ -221,7 +221,8 @@ body.drive .dock-head{display:none}
 body.drive .dock-video,body.drive .dock.min .dock-video{flex:none;padding-top:0;height:clamp(200px,56.25vw,34vh)}
 body.drive #drive{display:flex;flex-direction:column;flex:1;min-height:0;overflow:auto;padding:14px 16px calc(16px + env(safe-area-inset-bottom));color:#f3eadc;gap:12px}
 .dv-top{display:flex;justify-content:space-between;align-items:center;gap:10px}
-.dv-top b{font-size:18px}
+.dv-top b{font-size:18px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dv-topbtns{display:flex;gap:8px;flex:none}
 .dv-exit{background:rgba(255,255,255,.14);color:#fff;border:0;border-radius:22px;padding:11px 18px;font-size:15px;font-family:inherit}
 .dv-note{margin:0;font-size:14px;opacity:.7}
 .dv-lists{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -249,6 +250,28 @@ body.drive #drive{display:flex;flex-direction:column;flex:1;min-height:0;overflo
 .dv-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .dv-row button{min-height:64px;border-radius:18px;border:0;background:rgba(255,255,255,.1);color:#fff;font-size:15px;font-family:inherit}
 @media (min-width:721px){ body.drive #drive{max-width:640px;width:100%;margin:0 auto} }
+
+/* 드라이브 모드 가로 화면 */
+@media (orientation: landscape) and (max-height: 600px){
+  body.drive .dock,body.drive .dock.min{flex-direction:row}
+  body.drive .dock-video,body.drive .dock.min .dock-video{flex:none;width:50%;height:auto;margin-left:env(safe-area-inset-left)}
+  body.drive #drive{padding:10px calc(14px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) 14px;gap:8px}
+  .dv-top b{font-size:16px}
+  .dv-exit{padding:8px 14px;font-size:14px}
+  .dv-title{font-size:21px}
+  .dv-comp{font-size:15px;margin-top:-4px}
+  .dv-caption{min-height:0;font-size:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .dv-ctrl{gap:10px}
+  .dv-ctrl button{height:64px;font-size:28px;border-radius:18px}
+  .dv-ctrl button.main{font-size:34px}
+  .dv-row{gap:8px}
+  .dv-row button{min-height:46px;font-size:14px}
+  .dv-lists{grid-template-columns:repeat(3,1fr)}
+  .dv-list{min-height:64px;padding:12px}
+  .dv-list b{font-size:15px}
+  .dv-sets{grid-template-columns:repeat(4,1fr)}
+  .dv-set{min-height:52px;font-size:13px}
+}
 </style>
 
 </head>
@@ -1533,6 +1556,49 @@ function showFinder(p){
 
 /* ---------- 드라이브 모드 ---------- */
 function shuffle(a){ a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+/* ---------- 전체화면 · 화면 회전 ---------- */
+const FS = {
+  ok(){ return !!(document.fullscreenEnabled || document.webkitFullscreenEnabled); },
+  on(){ return !!(document.fullscreenElement || document.webkitFullscreenElement); },
+  async enter(){
+    try {
+      const el = document.documentElement;
+      if (!this.on()) await (el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen && el.webkitRequestFullscreen());
+    } catch(e){}
+    try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch(e){}
+  },
+  async exit(){ try { if (this.on()) await (document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen()); } catch(e){} }
+};
+document.addEventListener('fullscreenchange', () => { if (Drive.active) Drive.render(); });
+
+/* ---------- 잠금화면·알림창 미디어 정보와 버튼 ---------- */
+function mediaMeta(p){
+  if (!('mediaSession' in navigator) || !p) return;
+  try { navigator.mediaSession.metadata = new MediaMetadata({ title: p.t, artist: COMP[p.c].full, album: '클래식 산책', artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }] }); } catch(e){}
+}
+try {
+  if ('mediaSession' in navigator) {
+    const ms = navigator.mediaSession;
+    ms.setActionHandler('play', () => { if (Drive.started) { if (Narrator.paused) Narrator.resume(); else Player.play(); Drive.render(); } });
+    ms.setActionHandler('pause', () => { if (Drive.started) { if (Narrator.speaking) Narrator.pause(); else Player.pause(); Drive.render(); } });
+    ms.setActionHandler('nexttrack', () => Drive.next());
+    ms.setActionHandler('previoustrack', () => Drive.prev());
+  }
+} catch(e){}
+
+/* ---------- 다른 앱으로 전환했다 돌아올 때 ---------- */
+// 유튜브는 휴대폰에서 화면을 벗어나면 재생을 멈춥니다(유튜브 정책). 잠시 다시 재생을 시도하고,
+// 돌아오면 멈췄던 곳부터 자동으로 이어서 재생합니다.
+document.addEventListener('visibilitychange', () => {
+  if (!Drive.active || !Drive.started) return;
+  if (document.hidden) {
+    if (Player.wantPlay) [700, 2000, 5000].forEach(t => setTimeout(() => { if (document.hidden && Player.wantPlay && Player.st !== 1) Player.cmd('playVideo'); }, t));
+  } else {
+    if (Player.wantPlay && Player.st !== 1 && !Narrator.busy()) Player.play();
+    if (SET.fs !== false && !FS.on()) Drive.render();
+  }
+});
+
 const Drive = {
   active: false, started: false, list: [], i: 0, label: '', needTap: false, lock: null,
   lists(){
@@ -1552,6 +1618,7 @@ const Drive = {
   open(){
     if (Narrator.busy()) Narrator.stop();
     this.active = true;
+    if (SET.fs !== false) FS.enter();
     if (NAV) history.pushState({ drive: true }, '');
     document.body.classList.add('drive');
     dock.classList.remove('hidden','min');
@@ -1568,6 +1635,7 @@ const Drive = {
     else { dock.classList.add('hidden'); document.body.classList.remove('docked'); }
     try { this.lock && this.lock.release(); } catch(e){}
     this.lock = null;
+    FS.exit();
     render();
   },
   async wake(){
@@ -1589,6 +1657,7 @@ const Drive = {
       } else {
         Player.load(p, false);
       }
+      mediaMeta(p);
       Narrator.say(pieceClips(p, SET.len, first ? 'start' : 'next'), () => Player.play(), 'drive');
       const np = PIECE[this.list[this.i + 1]];
       if (np && hasAI(np)) setTimeout(() => Clips.prefetch(pieceClips(np, SET.len, 'next').map(c => c.k)), 4000);
@@ -1619,6 +1688,7 @@ const Drive = {
   },
   toggleNarr(){ SET.narr = !SET.narr; saveSet(); if (!SET.narr && Narrator.busy()) { Narrator.stop(); Player.play(); } this.render(); },
   cycleLen(){ const o = ['short','mid','long']; SET.len = o[(o.indexOf(SET.len) + 1) % 3]; saveSet(); this.render(); },
+  toggleFS(){ const on = FS.on(); SET.fs = !on; saveSet(); (on ? FS.exit() : FS.enter()).then(() => this.render()); },
   toggleAI(){ SET.ai = !SET.ai; saveSet(); this.render(); },
   cycleRate(){ const o = [0.9, 1, 1.15]; SET.rate = o[(o.indexOf(SET.rate) + 1) % 3] || 1; saveSet(); this.render(); },
   backToLists(){ Narrator.stop(); Player.pause(); this.started = false; this.render(); },
@@ -1634,6 +1704,7 @@ const Drive = {
   },
   render(){
     const el = document.getElementById('drive'); if (!el || !this.active) return;
+    const fsBtn = FS.ok() ? `<button class="dv-exit" onclick="Drive.toggleFS()">${FS.on() ? '⤡ 창 모드' : '⛶ 전체'}</button>` : '';
     const sets = `<div class="dv-sets">
         <button class="dv-set" onclick="Drive.toggleNarr()"><small>해설</small>${SET.narr ? '켜짐' : '꺼짐'}</button>
         <button class="dv-set" onclick="Drive.cycleLen()"><small>해설 길이</small>${LEN_LABEL[SET.len]}</button>
@@ -1641,7 +1712,7 @@ const Drive = {
         <button class="dv-set" onclick="Drive.toggleAI()"><small>해설 목소리</small>${SET.ai ? 'AI 성우' : '기기 기본'}</button>
       </div>`;
     if (!this.started) {
-      el.innerHTML = `<div class="dv-top"><b>🚗 드라이브 모드</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
+      el.innerHTML = `<div class="dv-top"><b>🚗 드라이브 모드</b><div class="dv-topbtns">${fsBtn}<button class="dv-exit" onclick="Drive.close()">나가기</button></div></div>
         <p class="dv-note">${Player.ready ? '출발 전에 들을 목록을 골라주세요. 곡마다 해설을 들려드린 뒤 음악이 이어지고, 끝나면 다음 곡으로 넘어갑니다.' : '플레이어 준비 중…'}</p>
         <div class="dv-lists">${this.lists().map(l => l.head ? `<h4 class="dv-head">${esc(l.head)}</h4>` : `<button class="dv-list ${l.primary ? 'primary' : ''}" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>
         ${sets}
@@ -1651,7 +1722,7 @@ const Drive = {
     const p = PIECE[this.list[this.i]], c = COMP[p.c];
     const [st, cls] = this.status();
     const playing = Narrator.speaking || Player.isPlaying();
-    el.innerHTML = `<div class="dv-top"><b>🚗 ${esc(this.label)}</b><button class="dv-exit" onclick="Drive.close()">나가기</button></div>
+    el.innerHTML = `<div class="dv-top"><b>🚗 ${esc(this.label)}</b><div class="dv-topbtns">${fsBtn}<button class="dv-exit" onclick="Drive.close()">나가기</button></div></div>
       <div class="dv-status ${cls}">${st}</div>
       <div class="dv-count">${this.i + 1} / ${this.list.length} · ${esc(ERA[c.era].name)} · ${esc(p.form)}</div>
       <h2 class="dv-title">${esc(p.t)}</h2>
