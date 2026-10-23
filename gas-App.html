@@ -5,7 +5,7 @@ const COMP = {}; DATA.composers.forEach(c => COMP[c.id] = c);
 const PIECE = {}; DATA.pieces.forEach(p => PIECE[p.id] = p);
 const COURSE_ORDER = DATA.course.flatMap(w => w.ids);
 
-const S = { videos:{}, listened:{}, notes:{}, hasApiKey:false };
+const S = { videos:{}, listened:{}, liked:{}, notes:{}, hasApiKey:false };
 const view = document.getElementById('view');
 const dock = document.getElementById('dock');
 let route = { v:'home' }, stack = [], libFilter = { q:'', era:'', form:'', lv:'' };
@@ -17,7 +17,8 @@ const LS = {
   set(k,v){ try { localStorage.setItem('cw_'+k, JSON.stringify(v)); } catch(e){} }
 };
 const Mock = {
-  getState(){ return { videos:LS.get('videos'), listened:LS.get('listened'), notes:LS.get('notes'), hasApiKey:false }; },
+  getState(){ return { videos:LS.get('videos'), listened:LS.get('listened'), liked:LS.get('liked'), notes:LS.get('notes'), hasApiKey:false }; },
+  setLiked(id,on){ const m=LS.get('liked'); if(on){ const d=new Date(), z=n=>String(n).padStart(2,'0'); m[id]=d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes()); } else delete m[id]; LS.set('liked',m); return m; },
   setListened(id,on){ const m=LS.get('listened'); if(on) m[id]=new Date().toISOString().slice(0,10); else delete m[id]; LS.set('listened',m); return m; },
   saveNote(id,t){ const m=LS.get('notes'); if(t) m[id]=t; else delete m[id]; LS.set('notes',m); return true; },
   saveVideo(id,u){ const v=parseId(u); if(!v) throw new Error('유튜브 링크를 인식하지 못했어요.'); const m=LS.get('videos'); m[id]=v; LS.set('videos',m); return v; },
@@ -57,6 +58,17 @@ function markListened(id){
   if (S.listened[id]) return;
   call('setListened', id, true).then(m => { S.listened = m; if (!Drive.active) refreshMarks(); }).catch(()=>{});
 }
+/* 좋아요 */
+const isLiked = id => !!(S.liked && S.liked[id]);
+function likedIds(){ return Object.keys(S.liked || {}).filter(id => PIECE[id]).sort((a, b) => String(S.liked[b]).localeCompare(String(S.liked[a]))); }
+window.toggleLike = function(id){
+  if (!PIECE[id]) return;
+  const on = !isLiked(id), before = Object.assign({}, S.liked);
+  if (on) S.liked[id] = new Date().toISOString().slice(0, 16).replace('T', ' '); else delete S.liked[id];
+  toast(on ? '❤️ 좋아요에 담았어요' : '좋아요를 뺐어요');
+  if (Drive.active) Drive.render(); else render();
+  call('setLiked', id, on).then(m => { if (m) S.liked = m; }).catch(() => { S.liked = before; toast('좋아요 저장 실패'); if (Drive.active) Drive.render(); else render(); });
+};
 function refreshMarks(){ if (['home','me','library','composer'].includes(route.v)) render(); }
 
 /* ---------- 설정 (해설 켜기/길이/속도) ---------- */
@@ -149,8 +161,8 @@ function composerClips(c){
   if (!NARR.c[c.id] || !NARR.v[c.id]) return composerScript(c).map(t => ({ t }));
   return [{ k: 'c_' + c.id, t: NARR.c[c.id].s }];
 }
-function silentWav(){
-  const n = 800, b = new ArrayBuffer(44 + n), d = new DataView(b), w = (o, s) => { for (let i = 0; i < s.length; i++) d.setUint8(o + i, s.charCodeAt(i)); };
+function silentWav(sec){
+  const n = Math.round((sec || 0.1) * 8000), b = new ArrayBuffer(44 + n), d = new DataView(b), w = (o, s) => { for (let i = 0; i < s.length; i++) d.setUint8(o + i, s.charCodeAt(i)); };
   w(0,'RIFF'); d.setUint32(4, 36 + n, true); w(8,'WAVE'); w(12,'fmt '); d.setUint32(16,16,true); d.setUint16(20,1,true); d.setUint16(22,1,true);
   d.setUint32(24,8000,true); d.setUint32(28,8000,true); d.setUint16(32,1,true); d.setUint16(34,8,true); w(36,'data'); d.setUint32(40,n,true);
   for (let i = 0; i < n; i++) d.setUint8(44 + i, 128);
@@ -464,7 +476,7 @@ function notify(){
     b.classList.toggle('on', on);
     b.textContent = on ? '⏹ 해설 멈추기' : (b.dataset.label || '🔊 해설 듣기');
   });
-  if (Drive.active) Drive.render();
+  if (Drive.active) { Drive.render(); mediaState(); }
 }
 
 /* ---------- 라우팅 (앱에서는 휴대폰 뒤로가기 버튼과 연동) ---------- */
@@ -535,6 +547,7 @@ function pieceRow(p, showComp = true){
   return `<div class="prow" onclick="go('piece','${p.id}')">
     <span class="era-dot" style="background:${e.color}"></span>
     <div class="t"><b>${esc(p.t)}</b><small>${showComp ? esc(c.name)+' · ' : ''}${esc(p.alias)} · ${esc(p.form)}</small></div>
+    ${isLiked(p.id) ? '<span class="hrt" title="좋아요">❤️</span>' : ''}
     <span class="lv" title="${LV[p.lv]}">${stars(p.lv)}</span>
     <span class="ck ${S.listened[p.id]?'on':''}">✓</span>
   </div>`;
@@ -694,6 +707,7 @@ function vPiece(id){
     <div class="actions">
       <button class="btn" id="playBtn">▶ 음악 듣기</button>
       <button class="btn ghost narr-btn" id="narrBtn" data-narr="p-${p.id}">🔊 해설 듣기</button>
+      <button class="btn ghost like-btn ${isLiked(id)?'on':''}" onclick="toggleLike('${id}')">${isLiked(id)?'❤️ 좋아요':'♡ 좋아요'}</button>
       <button class="btn ${S.listened[id]?'done':'ghost'}" id="doneBtn">${S.listened[id]?'✓ 들었어요 · '+S.listened[id]:'○ 들었어요'}</button>
     </div>
     <div class="swap-link"><a href="javascript:void(0)" id="swapLink">다른 연주로 바꾸기</a></div>
@@ -803,6 +817,24 @@ function mediaMeta(p){
   if (!('mediaSession' in navigator) || !p) return;
   try { navigator.mediaSession.metadata = new MediaMetadata({ title: p.t, artist: COMP[p.c].full, album: '클래식 산책', artwork: [{ src: 'icon-512.png', sizes: '512x512', type: 'image/png' }] }); } catch(e){}
 }
+/* ---------- 차량 핸들 버튼(블루투스 이전/다음 곡) ----------
+   휴대폰은 '지금 소리를 내고 있는 화면'에 버튼 신호를 보냅니다. 음악은 유튜브 영상(별도 화면) 안에서 나오므로,
+   드라이브 모드 동안 우리 앱도 들리지 않는 무음을 계속 재생해 버튼 신호를 우리 앱이 받도록 합니다.
+   (5초보다 짧은 소리는 휴대폰이 '효과음'으로 보고 무시하므로 10초짜리 무음을 반복) */
+const Keep = {
+  a: null, url: null,
+  on(){
+    try {
+      if (!this.a) { this.url = silentWav(10); this.a = new Audio(this.url); this.a.loop = true; this.a.preload = 'auto'; }
+      if (this.a.paused) { const p = this.a.play(); p && p.catch(() => {}); }
+    } catch(e){}
+  },
+  off(){ try { this.a && this.a.pause(); } catch(e){} }
+};
+function mediaState(){
+  if (!('mediaSession' in navigator)) return;
+  try { navigator.mediaSession.playbackState = (Narrator.speaking || Player.wantPlay) ? 'playing' : 'paused'; } catch(e){}
+}
 try {
   if ('mediaSession' in navigator) {
     const ms = navigator.mediaSession;
@@ -850,7 +882,8 @@ function driveSections(){
       it('course', '입문 코스 이어 듣기', course, (firstUnheard + 1) + '번째 곡부터 · ' + PIECE[course[0]].t, { primary: true }),
       it('best', '처음 듣는 명곡 베스트', PICKS.best),
       it('unheard', '아직 안 들은 곡 랜덤', unheard, unheard.length + '곡 섞어서', { random: true }),
-      it('all', '전체 곡 랜덤', DATA.pieces.map(p => p.id), DATA.pieces.length + '곡 섞어서', { random: true })
+      it('all', '전체 곡 랜덤', DATA.pieces.map(p => p.id), DATA.pieces.length + '곡 섞어서', { random: true }),
+      it('liked', '❤️ 좋아요한 곡', likedIds(), likedIds().length ? likedIds().length + '곡 · 골라 듣기' : '음악을 듣다가 ♡를 눌러 담아요', { like: true })
     ]},
     { head: '분위기 · 상황별', items: [
       it('morning', '☀️ 상쾌한 출근길', PICKS.morning),
@@ -911,7 +944,7 @@ const Drive = {
   close(fromPop){
     if (NAV && !fromPop && this.depth > 0) { history.go(-this.depth); return; }
     if (this.started) this.save();
-    Narrator.stop();
+    Narrator.stop(); Keep.off();
     this.active = false; this.started = false; this.needTap = false; this.mode = 'lists'; this.pick = null; this.queue = false; this.depth = 0;
     document.body.classList.remove('drive','dv-playing','dv-queue');
     if (Player.piece) { showDock(); setDockInfo(Player.piece); }
@@ -944,7 +977,7 @@ const Drive = {
     this.started = true; this.mode = 'play'; this.queue = false;
     document.body.classList.add('dv-playing');
     this.push('play');
-    Narrator.unlock();
+    Narrator.unlock(); Keep.on();
     this.step(true, at);
   },
   // 지난번 듣던 곳 (목록 · 몇 번째 곡 · 몇 초)
@@ -999,6 +1032,7 @@ const Drive = {
   },
   prev(){ if (!this.started) return; if (this.i > 0) this.i--; this.step(false); },
   toggle(){
+    Keep.on();
     if (Narrator.speaking) Narrator.pause();
     else if (Narrator.paused) Narrator.resume();
     else if (Player.isPlaying()) Player.pause();
@@ -1069,7 +1103,7 @@ const Drive = {
       el.innerHTML = `${this.topBar('🚗 드라이브 모드')}
         ${resume}
         <p class="dv-note">${Player.ready ? '들을 코스를 고르면 곡 목록이 나와요. 원하는 곡부터 시작할 수 있어요.' : '플레이어 준비 중…'}</p>
-        ${driveSections().map(s => `<h4 class="dv-head">${esc(s.head)}</h4><div class="dv-lists">${s.items.map(l => `<button class="dv-list ${l.primary ? 'primary' : ''}" ${l.ids.length ? '' : 'disabled'} onclick="Drive.choose('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>`).join('')}
+        ${driveSections().map(s => `<h4 class="dv-head">${esc(s.head)}</h4><div class="dv-lists">${s.items.map(l => `<button class="dv-list ${l.primary ? 'primary' : ''} ${l.like ? 'like' : ''}" ${l.ids.length ? '' : 'disabled'} onclick="Drive.choose('${l.k}')"><b>${esc(l.label)}</b><small>${esc(l.sub)}</small></button>`).join('')}</div>`).join('')}
         <h4 class="dv-head">설정</h4>${sets}
         <p class="dv-note">⚠️ 운전 중에는 화면 조작을 최소화하세요. 출발 전에 코스를 골라 두고, 화면은 거치대에 켜둔 채 사용하세요.</p>`;
       return;
@@ -1079,13 +1113,13 @@ const Drive = {
       el.innerHTML = `${this.topBar(esc(this.pick.label), 'Drive.pop()')}
         <button class="dv-startall" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('__pick', 0)">▶ 처음부터 전부 듣기 <small>${ids.length}곡</small></button>
         <p class="dv-note">곡을 누르면 그 곡부터 이어서 들어요.</p>
-        <div class="dv-q">${ids.map((id, n) => { const p = PIECE[id]; return `<button class="dv-qi" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('__pick', ${n})"><span class="n">${S.listened[id] ? '✓' : n + 1}</span><span class="t"><b>${esc(p.t)}</b><small>${esc(COMP[p.c].name)} · ${esc(p.dur)}</small></span><span class="go">▶</span></button>`; }).join('')}</div>`;
+        <div class="dv-q">${ids.map((id, n) => { const p = PIECE[id]; return `<button class="dv-qi" ${Player.ready ? '' : 'disabled'} onclick="Drive.start('__pick', ${n})"><span class="n">${S.listened[id] ? '✓' : n + 1}</span><span class="t"><b>${isLiked(id) ? '❤️ ' : ''}${esc(p.t)}</b><small>${esc(COMP[p.c].name)} · ${esc(p.dur)}</small></span><span class="go">▶</span></button>`; }).join('')}</div>`;
       return;
     }
     const p = PIECE[this.list[this.i]], c = COMP[p.c];
     if (this.queue) {
       el.innerHTML = `${this.topBar('곡 목록 · ' + (this.i + 1) + '/' + this.list.length, 'Drive.closeQueue()')}
-        <div class="dv-side dv-qwrap"><div class="dv-q">${this.list.map((id, n) => { const q = PIECE[id]; return `<button class="dv-qi ${n === this.i ? 'cur' : ''}" onclick="Drive.jump(${n})"><span class="n">${n === this.i ? '♪' : (S.listened[id] ? '✓' : n + 1)}</span><span class="t"><b>${esc(q.t)}</b><small>${esc(COMP[q.c].name)} · ${esc(q.dur)}</small></span><span class="go">▶</span></button>`; }).join('')}</div></div>`;
+        <div class="dv-side dv-qwrap"><div class="dv-q">${this.list.map((id, n) => { const q = PIECE[id]; return `<button class="dv-qi ${n === this.i ? 'cur' : ''}" onclick="Drive.jump(${n})"><span class="n">${n === this.i ? '♪' : (S.listened[id] ? '✓' : n + 1)}</span><span class="t"><b>${isLiked(id) ? '❤️ ' : ''}${esc(q.t)}</b><small>${esc(COMP[q.c].name)} · ${esc(q.dur)}</small></span><span class="go">▶</span></button>`; }).join('')}</div></div>`;
       return;
     }
     const [st, cls] = this.status();
@@ -1112,7 +1146,8 @@ const Drive = {
         </div>
         <div class="dv-row">
           ${Narrator.busy() ? '<button onclick="Drive.skipNarr()">⏩ 건너뛰기</button>' : '<button onclick="Drive.replay()">🔁 해설 다시</button>'}
-          <button onclick="Drive.openQueue()">🎵 곡 목록</button>
+          <button class="dv-like ${isLiked(p.id) ? 'on' : ''}" onclick="toggleLike('${p.id}')" aria-label="좋아요">${isLiked(p.id) ? '❤️ 좋아요' : '♡ 좋아요'}</button>
+          <button onclick="Drive.openQueue()">🎵 목록</button>
           <button onclick="Drive.toggleNarr()">해설 ${SET.narr ? '끄기' : '켜기'}</button>
         </div>
       </div>
@@ -1190,7 +1225,7 @@ function vMe(){
   return `<h1 class="serif" style="margin:0 0 14px">내 기록</h1>
   <div class="grid g3">
     <div class="card"><div class="muted">감상한 곡</div><b class="serif" style="font-size:30px">${ids.length}</b><span class="muted"> / ${DATA.pieces.length}</span></div>
-    <div class="card"><div class="muted">감상 메모</div><b class="serif" style="font-size:30px">${noteIds.length}</b></div>
+    <div class="card"><div class="muted">좋아요</div><b class="serif" style="font-size:30px">${likedIds().length}</b></div>
     <div class="card"><div class="muted">만난 작곡가</div><b class="serif" style="font-size:30px">${new Set(ids.map(id=>PIECE[id].c)).size}</b><span class="muted"> / ${DATA.composers.length}</span></div>
   </div>
 
@@ -1204,6 +1239,10 @@ function vMe(){
   <div class="grid g2">${noteIds.map(id => `<div class="card" style="cursor:pointer" onclick="go('piece','${id}')">
     <b>${esc(PIECE[id].t)}</b> <small class="muted">${esc(COMP[PIECE[id].c].name)}</small>
     <p style="margin:8px 0 0;white-space:pre-wrap;font-size:14px">${esc(S.notes[id].slice(0,160))}${S.notes[id].length>160?'…':''}</p></div>`).join('')}</div>` : ''}
+
+  <h2 class="sec-title">❤️ 좋아요한 곡</h2>
+  ${likedIds().length ? `<button class="btn" style="margin-bottom:10px" onclick="Drive.open();Drive.choose('liked')">🚗 좋아요한 곡 드라이브 모드로 듣기</button>
+  <div class="plist">${likedIds().map(id => pieceRow(PIECE[id])).join('')}</div>` : '<p class="muted">음악을 듣다가 마음에 들면 곡 화면이나 드라이브 모드에서 ♡ 좋아요를 눌러 보세요. 여기에 모아 둘게요.</p>'}
 
   <h2 class="sec-title">들은 곡</h2>
   ${ids.length ? `<div class="plist">${ids.map(id => pieceRow(PIECE[id])).join('')}</div>` : '<p class="muted">아직 기록이 없어요. 입문 코스 1주차부터 시작해 보세요.</p>'}

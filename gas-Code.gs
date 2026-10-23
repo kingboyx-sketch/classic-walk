@@ -36,7 +36,7 @@ function doPost(e) {
   try {
     const req = JSON.parse(e.postData.contents || '{}');
     if (!req.key || req.key !== appKey_()) throw new Error('연결 코드가 맞지 않아요. PC의 내 기록 화면에서 휴대폰 연결 링크를 다시 열어주세요.');
-    const fns = { getState: getState_, setListened: setListened_, saveNote: saveNote_, saveVideo: saveVideo_, clearVideo: clearVideo_, getClips: getClips_ };
+    const fns = { getState: getState_, setListened: setListened_, setLiked: setLiked_, saveNote: saveNote_, saveVideo: saveVideo_, clearVideo: clearVideo_, getClips: getClips_ };
     const fn = fns[req.fn];
     if (!fn) throw new Error('알 수 없는 요청');
     out = { ok: true, data: fn.apply(null, req.args || []) };
@@ -69,6 +69,7 @@ function owner_() { if (!isOwner_()) throw new Error('권한이 없어요'); }
 /* ---------- PC 페이지(google.script.run)에서 호출 — 주인만 ---------- */
 function getState() { owner_(); return getState_(); }
 function setListened(id, on) { owner_(); return setListened_(id, on); }
+function setLiked(id, on) { owner_(); return setLiked_(id, on); }
 function saveNote(id, text) { owner_(); return saveNote_(id, text); }
 function saveVideo(id, u) { owner_(); return saveVideo_(id, u); }
 function clearVideo(id) { owner_(); return clearVideo_(id); }
@@ -85,6 +86,7 @@ function getState_() {
   return {
     videos: readJson_('videos'),
     listened: readJson_('listened'),
+    liked: readJson_('liked'),
     notes: notes,
     hasApiKey: !!all.YOUTUBE_API_KEY
   };
@@ -96,6 +98,17 @@ function setListened_(id, on) {
     if (on) m[id] = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd');
     else delete m[id];
     writeJson_('listened', m);
+    return m;
+  });
+}
+
+// 좋아요: { 곡id: '2026-10-23 22:10' }
+function setLiked_(id, on) {
+  return withLock_(function () {
+    const m = readJson_('liked');
+    if (on) m[id] = Utilities.formatDate(new Date(), 'Asia/Seoul', 'yyyy-MM-dd HH:mm');
+    else delete m[id];
+    writeJson_('liked', m);
     return m;
   });
 }

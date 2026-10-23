@@ -273,8 +273,12 @@ body.dv-queue #drive{overflow:hidden}
 .dv-ctrl button.main{background:#e7c27d;color:#2b2622;font-size:34px}
 .dv-ctrl button.main.tap{animation:dvpulse 1s ease-in-out infinite}
 @keyframes dvpulse{50%{transform:scale(1.05);box-shadow:0 0 0 8px rgba(231,194,125,.3)}}
-.dv-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.dv-row button{min-height:48px;border-radius:14px;border:0;background:rgba(255,255,255,.1);color:#fff;font-size:14px;font-family:inherit;padding:4px}
+.dv-row{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+.dv-row button.dv-like.on{background:rgba(229,90,110,.28);color:#ffd7de}
+.dv-list.like:not(:disabled){background:rgba(229,90,110,.22)}
+.like-btn.on{border-color:#d9506a;color:#c0304e;background:#fff0f2}
+.prow .hrt{font-size:13px;flex:none}
+.dv-row button{min-height:48px;border-radius:14px;border:0;background:rgba(255,255,255,.1);color:#fff;font-size:13.5px;font-family:inherit;padding:4px 2px;word-break:keep-all;line-height:1.25}
 @media (min-width:721px){ body.drive #drive{max-width:640px;width:100%;margin:0 auto} }
 
 /* 드라이브 모드 가로 화면: 왼쪽 65% 영상, 오른쪽 35% 정보·버튼.
@@ -315,7 +319,8 @@ body.dv-queue #drive{overflow:hidden}
   .dv-ctrl button{height:44px;font-size:20px;border-radius:13px}
   .dv-ctrl button.main{font-size:24px}
   .dv-row{gap:5px}
-  .dv-row button{min-height:34px;font-size:12px;border-radius:11px;padding:2px}
+  .dv-row{gap:4px}
+  .dv-row button{min-height:36px;font-size:11.5px;border-radius:10px;padding:2px 1px}
   .dv-qi{min-height:48px;padding:7px 10px;gap:8px}
   .dv-qi .n{width:26px;height:26px;font-size:12px}
   .dv-qi .t b{font-size:14px}
